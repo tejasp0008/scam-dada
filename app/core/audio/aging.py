@@ -1,4 +1,4 @@
-"""Make a synthesised voice sound old, and sound like it came down a phone line.
+"""Make a synthesised voice sound old. The larynx, not the room and not the line.
 
 Timbre's catalogue has no elderly voice. Gnani publishes gender and language per voice but
 not age, and the male voices all read as 30-45. The gap between "a man" and "a retired
@@ -11,13 +11,16 @@ Four effects, in this order:
 2. **Tempo** — a WSOLA time-stretch puts duration back where we want it, independently of
    pitch. Without this step the only reachable combination is "lower *and* slower by the
    same factor", which overshoots: a voice slowed 15% is noticeably lower than an old man.
-3. **Tremble** — amplitude and pitch modulation around 5 Hz. Age shows up in a voice as
-   unsteadiness more than as pitch, which is why `<slow>` alone does not read as elderly.
-4. **Room tone** — mixed in here, between the voice processing and the band-pass, because a
-   real microphone hears the room and the carrier then filters voice and room together. See
-   `app.core.audio.ambience`.
-5. **Telephone band** — 300-3400 Hz, the G.712 channel. This does most of the perceptual
-   work: it removes the studio-clean low end that makes TTS sound like TTS.
+3. **Tremble** — amplitude and pitch modulation around 5 Hz, part periodic and part random
+   wander. Age shows up in a voice as unsteadiness more than as pitch, which is why `<slow>`
+   alone does not read as elderly. The random half matters: two pure sinusoids read as a
+   tremolo pedal, because nothing in a body modulates that evenly.
+4. **Breath** — an audible inhale before the first word. Synthetic speech starts from
+   absolute stillness, and nobody does that.
+
+This module is deliberately only the voice. The room it is spoken in lives in
+`app.core.audio.ambience`, the phone line in `app.core.audio.telephony`, and
+`app.core.audio.call_profile` is what puts the three in the right order.
 
 Everything is deterministic. The same PCM and the same preset always produce the same bytes,
 because the TTS cache is keyed by content hash and a modulator seeded from a clock would
@@ -27,8 +30,6 @@ Pure maths on numpy arrays. Nothing here opens a file or a socket.
 """
 
 from __future__ import annotations
-
-from typing import Protocol
 
 import numpy as np
 import numpy.typing as npt
@@ -44,19 +45,6 @@ TELEPHONE_HIGH_HZ = 3400.0
 #: Odd, so the kernel is symmetric and the filter is linear-phase (no smearing of the
 #: plosives the band-pass is already attenuating).
 _FIR_TAPS = 255
-
-
-class BedMixer(Protocol):
-    """Something that can lay room tone under a voice.
-
-    Declared here and implemented in `app.core.audio.ambience` so that the ageing chain can
-    mix a bed in at the right point without importing the generators — ambience needs this
-    module's band-pass, so the dependency can only run one way.
-    """
-
-    def mix_into(self, voice: Signal, offset: int = 0) -> Signal:
-        """Return `voice` with the bed added, starting `offset` samples into the loop."""
-        ...
 
 
 def band_pass_kernel(
@@ -173,6 +161,43 @@ def time_stretch(
     return (out[:used] / np.maximum(norm[:used], 1e-6)).astype(np.float32)
 
 
+def wander(count: int, sample_rate: int, rate_hz: float, rng: np.random.Generator) -> Signal:
+    """Band-limited random drift in [-1, 1], changing a few times a second.
+
+    Random control points interpolated onto the sample grid. This is the half of the tremble
+    that stops it sounding mechanical: a body's unsteadiness is noisy, not sinusoidal.
+    Seeded, so it is still reproducible.
+    """
+    if count <= 0:
+        return np.zeros(0, dtype=np.float32)
+    points = max(4, int(count / sample_rate * rate_hz * 2.0) + 2)
+    control = rng.standard_normal(points)
+    curve = np.interp(np.linspace(0.0, points - 1, count), np.arange(points), control)
+    peak = float(np.max(np.abs(curve)))
+    return (curve / peak if peak > 0.0 else curve).astype(np.float32)
+
+
+def inhale(sample_rate: int, *, duration_ms: float, rng: np.random.Generator) -> Signal:
+    """A breath: noise in the 400-1800 Hz band under a soft rise and fall.
+
+    Short and quiet on purpose. The cue is pre-attentive — a listener does not notice the
+    breath, they notice its absence, because TTS begins from perfect silence.
+    """
+    count = int(duration_ms / 1000.0 * sample_rate)
+    if count <= 0:
+        return np.zeros(0, dtype=np.float32)
+    noise = rng.standard_normal(count).astype(np.float32)
+    shaped = band_pass(noise, 400.0, 1800.0, sample_rate)
+    # Asymmetric envelope: an intake rises faster than it falls away.
+    t = np.linspace(0.0, 1.0, count, dtype=np.float32)
+    envelope = np.power(t, 0.6) * np.power(1.0 - t, 1.6)
+    peak = float(np.max(envelope))
+    if peak > 0.0:
+        envelope = envelope / peak
+    breath: Signal = (shaped * envelope).astype(np.float32)
+    return breath
+
+
 def tremble(
     samples: Signal,
     sample_rate: int,
@@ -180,23 +205,33 @@ def tremble(
     rate_hz: float,
     am_depth: float,
     vibrato_cents: float,
+    jitter: float = 0.0,
+    seed: int = 20261105,
 ) -> Signal:
     """Add the unsteadiness of an old voice: slow amplitude and pitch modulation.
 
-    Two modulators at incommensurate rates rather than one, and no random source at all.
-    A single sinusoid sounds like a tremolo pedal, while an RNG would make the output
-    depend on a seed and quietly break the content-hash TTS cache.
+    `jitter` is how much of the modulator is random wander rather than the sinusoidal pair.
+    Two sinusoids at incommensurate rates never repeat audibly, but they are still too even
+    to be a person; mixing in `wander` fixes that. The RNG is seeded from the preset rather
+    than from a clock, so the content-hash TTS cache stays meaningful.
     """
     if samples.size == 0:
         return samples
     if not 0.0 <= am_depth <= 1.0:
         raise ValueError("am_depth must be in [0, 1]")
+    if not 0.0 <= jitter <= 1.0:
+        raise ValueError("jitter must be in [0, 1]")
 
     t = np.arange(samples.size, dtype=np.float64) / sample_rate
     slow = np.sin(2.0 * np.pi * rate_hz * t)
     # 0.37 is irrational enough over a few seconds that the pair never repeats audibly.
     fast = np.sin(2.0 * np.pi * rate_hz * 0.37 * t + 1.1)
-    modulator = 0.72 * slow + 0.28 * fast
+    periodic = 0.72 * slow + 0.28 * fast
+    if jitter > 0.0:
+        drift = wander(samples.size, sample_rate, rate_hz * 0.8, np.random.default_rng(seed))
+        modulator = (1.0 - jitter) * periodic + jitter * drift.astype(np.float64)
+    else:
+        modulator = periodic
 
     out = samples.astype(np.float64)
     if vibrato_cents > 0.0:
@@ -236,30 +271,35 @@ class AgingPreset(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     name: str
-    pitch: float = Field(gt=0.5, le=1.0, description="Pitch scale. 0.94 is ~1 semitone down.")
-    speed: float = Field(gt=0.5, le=1.5, description="Playback speed. 0.9 is 10% slower.")
+    pitch: float = Field(default=1.0, gt=0.5, le=1.0, description="0.94 is ~1 semitone down.")
+    speed: float = Field(default=1.0, gt=0.5, le=1.5, description="0.9 is 10% slower.")
     tremble_hz: float = Field(default=5.0, ge=0.0, le=20.0)
     tremble_depth: float = Field(default=0.0, ge=0.0, le=1.0, description="AM depth.")
     vibrato_cents: float = Field(default=0.0, ge=0.0, le=80.0, description="Pitch wobble.")
-    band_low_hz: float = Field(default=TELEPHONE_LOW_HZ, ge=0.0)
-    band_high_hz: float = Field(default=TELEPHONE_HIGH_HZ, gt=0.0)
+    jitter: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=1.0,
+        description="Fraction of the tremble that is random wander rather than sinusoidal. "
+        "Without it the tremble reads as a tremolo effect instead of as an old man.",
+    )
+    inhale_ms: float = Field(
+        default=0.0, ge=0.0, le=900.0, description="Audible breath before the first word."
+    )
+    inhale_level: float = Field(default=0.08, ge=0.0, le=1.0)
+    seed: int = Field(default=20261105, description="Fixed, so the wander is reproducible.")
 
-    def apply(
-        self,
-        samples: Signal,
-        sample_rate: int,
-        *,
-        bed: BedMixer | None = None,
-        bed_offset: int = 0,
-        lead_ms: float = 0.0,
-    ) -> Signal:
-        """Run the full chain. Input and output are float32 in [-1, 1].
+    def apply(self, samples: Signal, sample_rate: int) -> Signal:
+        """Age the voice. Input and output are float32 in [-1, 1], peak-normalised.
 
-        `lead_ms` pads silence around the voice so a bed is heard on its own before the first
-        word, which is what makes an audition clip sound like a room rather than like a file.
-        Leave it at zero in the live path: there the bed is already running continuously, and
-        padding would be pure added latency before every reply.
+        Only the voice: no room, no carrier, no bed. `app.core.audio.call_profile` adds those
+        in the right order, which matters — a bed mixed after the carrier filter would carry
+        frequencies the line physically cannot.
         """
+        if samples.size == 0:
+            # Nothing said, nothing breathed. Otherwise a failed synthesis would still
+            # produce an audible inhale, and the persona would gasp and say nothing.
+            return samples
         out = samples.astype(np.float32, copy=True)
         out = resample_rate(out, self.pitch)
         # resample_rate already slowed the clip to `pitch` speed; this restores the asked-for
@@ -272,28 +312,56 @@ class AgingPreset(BaseModel):
                 rate_hz=self.tremble_hz,
                 am_depth=self.tremble_depth,
                 vibrato_cents=self.vibrato_cents,
+                jitter=self.jitter,
+                seed=self.seed,
             )
-        # Normalise before mixing: the bed level is set relative to the voice, so the voice
-        # has to be at a known level first or the bed is louder on quieter voices.
         out = peak_normalise(out)
-        if lead_ms > 0.0:
-            pad = np.zeros(int(lead_ms / 1000.0 * sample_rate), dtype=np.float32)
-            out = np.concatenate([pad, out, pad])
-        if bed is not None:
-            out = bed.mix_into(out, bed_offset)
-        out = band_pass(out, self.band_low_hz, self.band_high_hz, sample_rate)
-        return peak_normalise(out)
+        if self.inhale_ms > 0.0 and self.inhale_level > 0.0:
+            breath = inhale(
+                sample_rate,
+                duration_ms=self.inhale_ms,
+                # Offset so the breath is not the same noise as the tremble wander.
+                rng=np.random.default_rng(self.seed + 1),
+            )
+            # A short gap between the breath and the first word, as in real speech.
+            gap = np.zeros(int(0.06 * sample_rate), dtype=np.float32)
+            out = np.concatenate([breath * self.inhale_level, gap, out])
+        return out
 
 
 #: Presets for the audition, mildest first. These are post-processing, so all of them are
 #: derived from one synthesis per voice — the whole grid costs the credits of a single call.
 AGING_PRESETS: tuple[AgingPreset, ...] = (
-    # The control. No ageing at all, just the phone channel, so the audition shows how much
-    # of the effect is the band-pass rather than the pitch work.
-    AgingPreset(name="phone-only", pitch=1.0, speed=1.0),
-    AgingPreset(name="mild", pitch=0.97, speed=0.95, tremble_depth=0.07, vibrato_cents=12.0),
-    AgingPreset(name="classic", pitch=0.94, speed=0.90, tremble_depth=0.14, vibrato_cents=22.0),
-    AgingPreset(name="frail", pitch=0.91, speed=0.85, tremble_depth=0.22, vibrato_cents=34.0),
+    # The control: the voice as Timbre produced it. Pairing this with the `studio` telephony
+    # preset is how the audition shows what each stage is actually contributing.
+    AgingPreset(name="none", jitter=0.0),
+    AgingPreset(
+        name="mild",
+        pitch=0.97,
+        speed=0.95,
+        tremble_depth=0.07,
+        vibrato_cents=12.0,
+        inhale_ms=280.0,
+        inhale_level=0.05,
+    ),
+    AgingPreset(
+        name="classic",
+        pitch=0.94,
+        speed=0.90,
+        tremble_depth=0.14,
+        vibrato_cents=22.0,
+        inhale_ms=380.0,
+        inhale_level=0.08,
+    ),
+    AgingPreset(
+        name="frail",
+        pitch=0.91,
+        speed=0.85,
+        tremble_depth=0.22,
+        vibrato_cents=34.0,
+        inhale_ms=460.0,
+        inhale_level=0.11,
+    ),
 )
 
 PRESETS_BY_NAME: dict[str, AgingPreset] = {preset.name: preset for preset in AGING_PRESETS}

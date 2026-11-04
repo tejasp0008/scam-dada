@@ -1,4 +1,4 @@
-.PHONY: help install up down logs migrate revision lint fmt types test test-contract check dev smoke audition audition-male
+.PHONY: help install up down logs migrate revision lint fmt types test test-contract check dev smoke audition audition-male audition-ladder
 
 help:
 	@grep -E '^[a-z-]+:.*?##' $(MAKEFILE_LIST) | sed 's/:.*##/\t/'
@@ -49,5 +49,8 @@ smoke:  ## Hit every real provider once end to end; prints latency and credits s
 audition:  ## Synthesise one line in every Timbre v3.0 voice. make audition ARGS="--male"
 	.venv/bin/python scripts/audition_voices.py $(ARGS)
 
-audition-male:  ## Dada's audition: six male voices x four ageing presets, 6 requests
+audition-male:  ## Every male voice at Dada's chosen profile, to compare voices (6 requests)
 	.venv/bin/python scripts/audition_voices.py --male --aged
+
+audition-ladder:  ## One voice through every realism stage, to choose a profile (1 request)
+	.venv/bin/python scripts/audition_voices.py --male --ladder

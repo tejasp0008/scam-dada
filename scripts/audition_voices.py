@@ -1,26 +1,29 @@
-"""Synthesise one line in every Timbre v3.0 voice, aged and over room tone, so a human can pick.
+"""Synthesise one line per Timbre v3.0 voice and render it through the full call chain.
 
 Gnani publishes gender and language per voice but not age, and none of the male voices reads
-as a man in his seventies. So this script does three things from one API call per voice:
+as a man in his seventies. Nor does any TTS output sound like a phone call. So this script
+does two separable things:
 
-* writes the voice as Timbre returned it,
-* writes it through each local ageing preset, and
-* lays a synthetic room-tone bed under each one.
+* **one API call per voice**, and
+* a grid of local renders of that one call.
 
-Ageing and ambience are pure DSP (`app.core.audio.aging`, `app.core.audio.ambience`), so the
-whole grid costs the credits of a single synthesis per voice. Thirty-three clips, six
-requests.
+Everything after synthesis is pure DSP — ageing, room reverb, room tone, and the phone line
+itself (`app/core/audio/`) — so the whole grid costs the credits of a single synthesis per
+voice.
 
-Judge the aged clips, not the raw ones. The raw clip is there to show what the ageing is
-doing, but nobody will ever hear it on a call.
+Two ways to use it:
+
+* `--ladder` renders one voice through every stage of the realism ladder, cleanest first, so
+  you can hear what each stage contributes. This is how you choose a profile.
+* `--aged` renders every voice at one profile, so you can compare voices on equal terms.
+  This is how you choose a voice.
 
 Output WAVs get headers we write ourselves: Timbre's `container=wav` responses declare a
 0xFFFFFFFF data size, which makes every player misreport the duration.
 
-    python scripts/audition_voices.py --male --aged        # Dada's audition
-    python scripts/audition_voices.py --male --aged --ambience fan-and-street
-    python scripts/audition_voices.py --male --aged --voices Avinash,Prakash --presets classic
-    python scripts/audition_voices.py                      # the seven female voices, raw
+    python scripts/audition_voices.py --male --ladder            # Devansh through the ladder
+    python scripts/audition_voices.py --male --aged              # all six at one profile
+    python scripts/audition_voices.py --male --ladder --voices Prakash --room quiet-room
 """
 
 from __future__ import annotations
@@ -34,8 +37,13 @@ from pathlib import Path
 import httpx
 import numpy as np
 
-from app.core.audio.aging import AGING_PRESETS, PRESETS_BY_NAME, AgingPreset, peak_normalise
 from app.core.audio.ambience import AMBIENCE_BY_NAME, AmbienceBed
+from app.core.audio.call_profile import (
+    CALL_PROFILES,
+    DEFAULT_ELDER_PROFILE,
+    PROFILES_BY_NAME,
+    CallProfile,
+)
 from app.core.audio.framing import float32_to_pcm, pcm_to_float32, pcm_to_wav
 from app.core.cost import BillingPool
 from app.core.tags import ELDER_TAGS, billable_characters, sanitize_tags
@@ -53,10 +61,14 @@ from app.providers.gnani_timbre import GnaniTimbreTTS
 FEMALE_VOICES = ("Shivani", "Lakshmi", "Kalpana", "Chetana", "Vasudha", "Riyaa", "Tarika")
 MALE_VOICES = ("Avinash", "Shubham", "Prakash", "Devansh", "Yashraj", "Harshad")
 
-#: One line for every voice, so the comparison is fair. It is Dada in character — the
-#: glasses, the employee number, the Railways — and it exercises the four tags he is allowed
-#: to use. `<slow>` goes near the front because a Timbre tag applies from its position to
-#: the end of the input, so one tag slows everything after it.
+#: Chosen by ear from the first audition. The ladder defaults to this one voice because
+#: rendering six voices through six profiles is 36 clips, which nobody listens to.
+LEAD_VOICE = "Devansh"
+
+#: One line per voice, so the comparison is fair. It is Dada in character — the glasses, the
+#: employee number, the Railways — and it exercises the four tags he is allowed to use.
+#: `<slow>` goes near the front because a Timbre tag applies from its position to the end of
+#: the input, so one tag slows everything after it.
 AUDITION_LINE = (
     "Haan beta, <slow> ek minute. <coughs> Mera chashma kahan gaya. "
     "<pauses> Aap apna employee number bataiye na, main likh leta hoon. "
@@ -64,13 +76,9 @@ AUDITION_LINE = (
 )
 SAMPLE_RATE = 24000
 
-#: Silence around each clip, so the bed is audible on its own before the first word. The
+#: Silence around each clip, so the room is audible on its own before the first word. The
 #: live path uses zero: there the bed already runs continuously between utterances.
-LEAD_MS = 450.0
-
-#: Which ageing preset the ambience comparison uses, so the three beds are judged against a
-#: constant voice treatment.
-AMBIENCE_REFERENCE_PRESET = "classic"
+LEAD_MS = 600.0
 
 
 def _write(path: Path, samples: np.ndarray, sample_rate: int) -> float:
@@ -80,28 +88,31 @@ def _write(path: Path, samples: np.ndarray, sample_rate: int) -> float:
     return len(pcm) / 2 / sample_rate
 
 
-def _default_out(male: bool, aged: bool) -> Path:
-    if aged:
-        return Path("var/auditions/aged-male") if male else Path("var/auditions/aged")
-    return Path("var/auditions")
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--male", action="store_true", help="audition the male voices instead")
+    parser.add_argument("--male", action="store_true", help="audition the male voices")
+    parser.add_argument(
+        "--ladder",
+        action="store_true",
+        help=f"render one voice (default {LEAD_VOICE}) through every realism profile",
+    )
     parser.add_argument(
         "--aged",
         action="store_true",
-        help="also write every ageing preset: pitch down, slower tempo, tremble, phone band",
+        help="render every voice through one profile, to compare voices on equal terms",
     )
     parser.add_argument(
-        "--ambience",
-        default="ceiling-fan",
-        help=f"room tone under the aged clips, or 'none'. One of {sorted(AMBIENCE_BY_NAME)}",
+        "--profile",
+        default=DEFAULT_ELDER_PROFILE,
+        help=f"profile used by --aged. One of {[p.name for p in CALL_PROFILES]}",
     )
-    parser.add_argument("--voices", help="comma-separated subset, e.g. Avinash,Prakash")
-    parser.add_argument("--presets", help="comma-separated subset of ageing preset names")
-    parser.add_argument("--out", type=Path, default=None)
+    parser.add_argument(
+        "--room",
+        default=None,
+        help=f"override the room tone on every profile. One of {sorted(AMBIENCE_BY_NAME)}",
+    )
+    parser.add_argument("--voices", help="comma-separated subset, e.g. Devansh,Prakash")
+    parser.add_argument("--out", type=Path, default=Path("var/auditions/aged-male"))
     parser.add_argument("--text", default=AUDITION_LINE)
     args = parser.parse_args()
 
@@ -110,40 +121,25 @@ def main() -> int:
     if not settings.gnani_api_key:
         print("GNANI_API_KEY is not set in .env", file=sys.stderr)
         return 2
+    if not args.ladder and not args.aged:
+        print("nothing to do: pass --ladder, --aged, or both", file=sys.stderr)
+        return 2
+    if args.profile not in PROFILES_BY_NAME:
+        print(f"unknown profile {args.profile!r}; have {sorted(PROFILES_BY_NAME)}", file=sys.stderr)
+        return 2
+    if args.room is not None and args.room not in AMBIENCE_BY_NAME:
+        print(f"unknown room {args.room!r}; have {sorted(AMBIENCE_BY_NAME)}", file=sys.stderr)
+        return 2
 
     if args.voices:
         voices = tuple(v.strip() for v in args.voices.split(",") if v.strip())
-    else:
+    elif args.aged:
         voices = MALE_VOICES if args.male else FEMALE_VOICES
+    else:
+        voices = (LEAD_VOICE,)
 
-    presets: tuple[AgingPreset, ...] = ()
-    if args.aged:
-        if args.presets:
-            try:
-                presets = tuple(PRESETS_BY_NAME[n.strip()] for n in args.presets.split(","))
-            except KeyError as exc:
-                print(
-                    f"unknown ageing preset {exc}; have {sorted(PRESETS_BY_NAME)}", file=sys.stderr
-                )
-                return 2
-        else:
-            presets = AGING_PRESETS
-
-    bed: AmbienceBed | None = None
-    if args.aged and args.ambience != "none":
-        if args.ambience not in AMBIENCE_BY_NAME:
-            print(
-                f"unknown ambience {args.ambience!r}; have {sorted(AMBIENCE_BY_NAME)}",
-                file=sys.stderr,
-            )
-            return 2
-        bed = AmbienceBed(AMBIENCE_BY_NAME[args.ambience], SAMPLE_RATE)
-
-    out = args.out or _default_out(args.male, args.aged)
-    out.mkdir(parents=True, exist_ok=True)
-    rooms = out / "_rooms"
-    if bed is not None:
-        rooms.mkdir(exist_ok=True)
+    ladder = tuple(_with_room(p, args.room) for p in CALL_PROFILES) if args.ladder else ()
+    chosen = _with_room(PROFILES_BY_NAME[args.profile], args.room) if args.aged else None
 
     # The persona is only allowed six of the thirteen tags. Running the audition line through
     # the same filter the persona output will go through means the line cannot quietly use a
@@ -154,34 +150,54 @@ def main() -> int:
 
     chars = billable_characters(text)
     estimate = settings.cost_model().price_tts(chars * len(voices))
-    print(f"Auditioning {len(voices)} voices on {settings.tts_model}")
+    print(f"Auditioning {len(voices)} voice(s) on {settings.tts_model}: {', '.join(voices)}")
     print(f'Line ({chars} billable chars incl. tags): "{text}"')
-    if presets:
-        print(f"Ageing presets (local DSP, no extra credits): {', '.join(p.name for p in presets)}")
-    if bed is not None:
-        layers = ", ".join(f"{n} {w:g}" for n, w in bed.preset.layers())
-        print(f"Room tone: {bed.preset.name} at {bed.preset.level_db:g} dB  [{layers}]")
+    if ladder:
+        print(f"Realism ladder: {' -> '.join(p.name for p in ladder)}")
+    if chosen is not None:
+        print(f"Per-voice profile: {chosen.name}")
+    if args.room:
+        print(f"Room overridden to: {args.room}")
     print(
         f"Estimated cost: {estimate.credits:.3f} credits"
-        f"{' (rate is a placeholder)' if estimate.estimated else ''}\n"
+        f"{' (rate is a placeholder)' if estimate.estimated else ''}"
+        "  (renders are local DSP and cost nothing)\n"
     )
-    return asyncio.run(_run(settings, voices, presets, bed, out, rooms, text))
+
+    args.out.mkdir(parents=True, exist_ok=True)
+    return asyncio.run(_run(settings, voices, ladder, chosen, args.out, text))
+
+
+def _with_room(profile: CallProfile, room: str | None) -> CallProfile:
+    """Swap the room tone without touching the voice or the line."""
+    if room is None or profile.ambience is None:
+        return profile
+    return profile.model_copy(update={"ambience": AMBIENCE_BY_NAME[room]})
+
+
+def _describe(profile: CallProfile) -> str:
+    parts = [f"age={profile.aging.name}", f"line={profile.telephony.name}"]
+    parts.append(f"room={profile.ambience.name}" if profile.ambience else "room=none")
+    parts.append("reverb" if profile.acoustics else "dry")
+    return " ".join(parts)
 
 
 async def _run(
     settings: Settings,
     voices: tuple[str, ...],
-    presets: tuple[AgingPreset, ...],
-    bed: AmbienceBed | None,
+    ladder: tuple[CallProfile, ...],
+    chosen: CallProfile | None,
     out: Path,
-    rooms: Path,
     text: str,
 ) -> int:
     ok: list[str] = []
     failed: list[str] = []
     fastest: tuple[str, float] | None = None
-    dsp_ms: list[float] = []
-    reference: np.ndarray | None = None
+    renders = 0
+    render_ms: list[float] = []
+    # Beds are expensive to build and identical between renders of the same room, so build
+    # each one once. This is exactly what a live call does for the whole call.
+    beds: dict[str, AmbienceBed] = {}
 
     # The guard is wired in even for a one-off script: an audition is real spend, and
     # unrecorded spend makes the end-of-project credit numbers a guess.
@@ -229,72 +245,49 @@ async def _run(
 
             raw = pcm_to_float32(bytes(pcm))
             seconds = _write(out / f"{voice.lower()}.raw.wav", raw, SAMPLE_RATE)
-            print(
-                f"  {voice:10} first audio {first_byte_ms:6.0f} ms   {seconds:4.1f}s   "
-                f"{voice.lower()}.raw.wav  (unprocessed reference)"
-            )
+            print(f"  {voice:10} first audio {first_byte_ms:6.0f} ms   {seconds:4.1f}s   raw")
             ok.append(voice)
-            if reference is None:
-                reference = raw
             if fastest is None or first_byte_ms < fastest[1]:
                 fastest = (voice, first_byte_ms)
 
-            for preset in presets:
-                began = time.perf_counter()
-                # A different point in the bed loop per clip, so the fan is not in the same
-                # phase on all 24 files and the comparison is not accidentally rigged.
-                aged = preset.apply(
+            wanted = (*ladder, *((chosen,) if chosen is not None else ()))
+            for profile in wanted:
+                if profile.ambience is not None and profile.ambience.name not in beds:
+                    beds[profile.ambience.name] = AmbienceBed(profile.ambience, SAMPLE_RATE)
+                bed = beds.get(profile.ambience.name) if profile.ambience else None
+                result = profile.render(
                     raw,
                     SAMPLE_RATE,
                     bed=bed,
-                    bed_offset=index * SAMPLE_RATE * 2,
+                    # A different point in the loop per voice, so the fan is not in the same
+                    # phase on every clip and the comparison is not accidentally rigged.
+                    bed_offset=index * SAMPLE_RATE * 3,
                     lead_ms=LEAD_MS,
                 )
-                elapsed_ms = (time.perf_counter() - began) * 1000
-                dsp_ms.append(elapsed_ms)
-                aged_seconds = _write(out / f"{voice.lower()}.{preset.name}.wav", aged, SAMPLE_RATE)
+                name = f"{voice.lower()}.{profile.name}.wav"
+                _write(out / name, result.audio, SAMPLE_RATE)
+                renders += 1
+                render_ms.append(result.total_ms)
+                loss = f" {result.dropped_packets} pkt lost" if result.dropped_packets else ""
+                stages = " ".join(f"{k} {v:.0f}ms" for k, v in result.stage_ms.items())
                 print(
-                    f"             {preset.name:11} {aged_seconds:4.1f}s   "
-                    f"{elapsed_ms:5.1f} ms DSP   {voice.lower()}.{preset.name}.wav"
+                    f"             {profile.name:12} {result.seconds:4.1f}s  "
+                    f"[{stages}]{loss}   {name}"
                 )
-
-    # One voice, one ageing preset, every bed: so the room can be chosen separately from
-    # the voice instead of being confounded with it.
-    if reference is not None and bed is not None and AMBIENCE_REFERENCE_PRESET in PRESETS_BY_NAME:
-        preset = PRESETS_BY_NAME[AMBIENCE_REFERENCE_PRESET]
-        print(f"\nRoom tone options on {ok[0]} + {preset.name}, in {rooms}/:")
-        for name, ambience in AMBIENCE_BY_NAME.items():
-            other = AmbienceBed(ambience, SAMPLE_RATE)
-            _write(
-                rooms / f"{name}.wav",
-                preset.apply(reference, SAMPLE_RATE, bed=other, lead_ms=LEAD_MS),
-                SAMPLE_RATE,
-            )
-            # The bare bed too: easier to tell a fan from traffic without a voice over it.
-            # Peak-normalised rather than scaled by a constant: the loop is unit RMS, so its
-            # peak is several times 1.0 and any fixed gain clips it into a crackle.
-            _write(
-                rooms / f"{name}.bed-only.wav",
-                peak_normalise(other.take(SAMPLE_RATE * 4), 0.6),
-                SAMPLE_RATE,
-            )
-            print(f"  {name:16} {ambience.level_db:6.1f} dB   {name}.wav + {name}.bed-only.wav")
+                print(f"             {'':12} {_describe(profile)}")
 
     status = await budget.status(BillingPool.GNANI)
     await redis.aclose()
     await engine.dispose()
 
-    print(f"\n{len(ok)}/{len(voices)} voices synthesised into {out}/")
+    print(f"\n{len(ok)}/{len(voices)} voices synthesised, {renders} renders into {out}/")
     print(f"Timbre: {tts.misses} synthesised, {tts.hits} served from cache")
-    if fastest is not None:
+    if fastest is not None and len(voices) > 1:
         print(f"Fastest to first audio: {fastest[0]} at {fastest[1]:.0f} ms")
-    if dsp_ms:
-        # This number decides whether ageing can run in the live path or has to be baked in
-        # at cache-write time. A few milliseconds per utterance is free; a few hundred is not.
-        print(
-            f"Ageing + room tone: {len(dsp_ms)} clips, "
-            f"{min(dsp_ms):.0f}-{max(dsp_ms):.0f} ms each, 0 extra credits"
-        )
+    if render_ms:
+        # This number decides whether the chain can run in the live path or has to be baked
+        # in at cache-write time. A few milliseconds per utterance is free; hundreds are not.
+        print(f"Render: {min(render_ms):.0f}-{max(render_ms):.0f} ms per clip, 0 extra credits")
     print(f"\nListen to all of them:\n  open {out}/")
     print(
         f"\nGnani pool now at {status.spent:.4f} credits of a "

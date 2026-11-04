@@ -11,9 +11,11 @@ from app.core.audio.ambience import (
     MAINS_HZ,
     AmbienceBed,
     AmbiencePreset,
+    RoomAcoustics,
     ceiling_fan,
     mains_hum,
     room_floor,
+    room_reverb,
     street,
 )
 
@@ -158,3 +160,53 @@ class TestPresets:
     def test_a_positive_level_is_refused(self) -> None:
         with pytest.raises(ValueError):
             AmbiencePreset(name="t", floor=1.0, level_db=6.0)
+
+
+class TestRoomAcoustics:
+    def test_the_impulse_response_starts_with_the_direct_sound(self) -> None:
+        response = RoomAcoustics().impulse_response(RATE)
+        assert float(np.abs(response[0])) == float(np.max(np.abs(response)))
+
+    def test_the_response_decays(self) -> None:
+        response = RoomAcoustics(reverb_ms=300.0).impulse_response(RATE)
+        third = response.size // 3
+        assert rms(response[:third]) > rms(response[-third:]) * 3
+
+    def test_the_response_is_the_requested_length(self) -> None:
+        response = RoomAcoustics(reverb_ms=250.0).impulse_response(RATE)
+        assert response.size == pytest.approx(0.25 * RATE, rel=0.01)
+
+    def test_it_is_seeded(self) -> None:
+        acoustics = RoomAcoustics()
+        assert np.array_equal(acoustics.impulse_response(RATE), acoustics.impulse_response(RATE))
+
+    def test_reverb_keeps_the_length_and_the_level(self) -> None:
+        """A reverb that changes either would break the bed level and the clip timing."""
+        source = voice(1.0)
+        wet = room_reverb(source, RATE, RoomAcoustics())
+        assert wet.size == source.size
+        assert rms(wet) == pytest.approx(rms(source), rel=0.2)
+
+    def test_reverb_actually_changes_the_signal(self) -> None:
+        source = voice(0.5)
+        assert not np.array_equal(room_reverb(source, RATE, RoomAcoustics()), source)
+
+    def test_reverb_smears_a_click_forwards_in_time(self) -> None:
+        """The audible point of reverb: energy arrives after the sound that caused it."""
+        click = np.zeros(RATE, dtype=np.float32)
+        click[100] = 1.0
+        wet = room_reverb(click, RATE, RoomAcoustics(mix=0.9))
+        assert rms(wet[200:3000]) > 0.0
+        assert rms(click[200:3000]) == 0.0
+
+    def test_a_zero_mix_is_a_no_op(self) -> None:
+        source = voice(0.3)
+        assert np.array_equal(room_reverb(source, RATE, RoomAcoustics(mix=0.0)), source)
+
+    def test_an_empty_signal_survives(self) -> None:
+        empty = np.zeros(0, dtype=np.float32)
+        assert room_reverb(empty, RATE, RoomAcoustics()).size == 0
+
+    def test_a_room_longer_than_a_hall_is_refused(self) -> None:
+        with pytest.raises(ValueError):
+            RoomAcoustics(reverb_ms=5000.0)

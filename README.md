@@ -25,11 +25,13 @@ Built for the Great Indian AI Internship Challenge on Gnani's speech models.
 | **LLM** | OpenAI-compatible adapter, streaming + validated JSON, automatic fallback to a second model |
 | **TTS cache** | Content-hash cache; hits cost nothing and record what they avoided |
 | **Budget guard** | Credits (₹) per pool with a hard stop, raw units kept for auditability |
-| **Voice ageing** | Pitch, WSOLA tempo, tremble and a 300–3400 Hz telephone band — Timbre has no elderly voice, so Dada's is made in DSP |
-| **Room tone** | Synthetic ceiling fan, mains hum, street and room floor, mixed under the voice before the band-pass |
+| **Voice ageing** | Pitch, WSOLA tempo, tremble with aperiodic jitter, and an audible breath before the first word — Timbre has no elderly voice, so Dada's is made in DSP |
+| **Room** | Synthetic ceiling fan, mains hum, street and room floor, plus a short reverb that puts the voice *in* the room rather than over it |
+| **Phone line** | Handset presence bump, carrier AGC, 8 kHz narrowband, G.711 mu-law companding, packet loss with concealment |
+| **Call profiles** | The three stages composed in the one order that is physically correct, as a six-rung ladder from `studio` to `bad-line` |
 | **Audio tags** | The 13-tag Timbre v3.0 catalogue, with a per-persona allowed set; unknown tags are billed and then discarded by the API, so they are stripped first |
 | **Personas** | Dada and grandson prompts, ethics block shared and digest-pinned, relay registry |
-| Tests | 269 offline + 64 contract, `ruff` and `mypy` clean (`mypy --strict` on `core` and `providers`) |
+| Tests | 363 offline + 64 contract, `ruff` and `mypy` clean (`mypy --strict` on `core` and `providers`) |
 
 Measured on the live APIs by `make smoke` (n=1 per provider, 2026-11-04):
 
@@ -87,7 +89,7 @@ flowchart TB
         EV["event schema"]
         AUD["audio: framing, resample, VAD"]
         INTEL["personas, tags, tactics, risk,<br/>extract, stages, canary"]
-        AGE["ageing + room tone<br/>pitch, tempo, tremble, band"]
+        AGE["call profile<br/>voice → room → line"]
     end
 
     subgraph providers["providers — ports + adapters"]
@@ -128,7 +130,7 @@ cp .env.example .env     # then fill in GNANI_API_KEY and the LLM_* values
 make install             # venv on 3.11 + dev dependencies
 make up                  # postgres + redis
 make migrate             # apply the baseline schema
-make test                # 269 tests, offline, zero API cost
+make test                # 363 tests, offline, zero API cost
 make dev                 # api on http://localhost:8000
 ```
 
@@ -151,7 +153,8 @@ surprise on stage.
 | `make test-contract` | Adapters against recorded sample payloads, still offline |
 | `make smoke` | **Spends credits.** One real call per provider end to end; prints latency and cost |
 | `make audition` | **Spends credits.** One line in every Timbre v3.0 voice. `ARGS="--male"` for the male set |
-| `make audition-male` | **Spends credits** (6 requests). Dada's audition: six male voices × four ageing presets × room tone, 33 clips from 6 API calls |
+| `make audition-male` | **Spends credits** (6 requests). Every male voice at Dada's chosen profile, to compare voices |
+| `make audition-ladder` | 1 request, or free from cache. One voice through all six realism profiles, to choose a profile |
 | `make lint` / `make fmt` / `make types` | `ruff` and `mypy` |
 | `make check` | Everything that gates a phase |
 | `make revision m="..."` | Autogenerate a migration |
@@ -209,11 +212,15 @@ real limit.
 - **Timbre documents no cancel message** on either streaming transport, so an interrupted
   reply is abandoned client-side rather than cancelled upstream. Audio already synthesised
   has already been billed.
-- **Voice ageing runs per utterance, not per chunk.** Measured at 4–136 ms for a 10–13 s
-  clip (~1.2% of real time), but the WSOLA time-stretch needs lookahead, so today the whole
-  utterance is processed before the first byte goes out. Fillers will be aged once at
+- **The call chain runs per utterance, not per chunk.** Measured at 0–145 ms for a 13 s
+  render (~1% of real time), but the WSOLA time-stretch needs lookahead, so today the whole
+  utterance is processed before the first byte goes out. Fillers will be rendered once at
   cache-write time; a chunk-wise stretch with one frame of lookahead is the fix if the
   per-utterance cost shows up in the live path.
+- **The room tone is generated, not recorded.** A fan, mains hum, traffic and a room floor
+  from noise and sinusoids. It is convincing in a phone band, and it means no audio had to be
+  sourced, licensed or committed — but it is not a real room, and a trained ear listening for
+  it on a wideband monitor will hear that.
 - **Timbre's output is not byte-identical between runs.** The same text and voice came back
   10.3 s long on one run and 10.2 s on another, so the TTS cache is the only way to get a
   reproducible demo, not merely a cheaper one.

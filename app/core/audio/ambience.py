@@ -7,6 +7,10 @@ than from recordings: nothing has to be sourced, licensed or committed, and — 
 generators are seeded — the same preset always produces the same bytes, which the
 content-hash TTS cache depends on.
 
+This module also holds the room's *acoustics* — a short reverb — because that is the other
+half of sounding like a place. Without it the voice is dry and the bed sits behind it, which
+reads as "a recording with noise added" rather than as one room. Reverb is what glues them.
+
 **Where it sits in the chain matters.** The bed is mixed in *before* the telephone band-pass,
 not after, because in reality the microphone hears the room and then the carrier filters the
 voice and the room together. Mixing after the band-pass would put 50 Hz hum and full-band
@@ -37,6 +41,76 @@ MAINS_HZ = 50.0
 
 def _white(rng: np.random.Generator, count: int) -> npt.NDArray[np.float64]:
     return rng.standard_normal(count)
+
+
+def _fft_convolve(signal: Signal, kernel: Signal) -> Signal:
+    """Convolve via FFT.
+
+    A 300 ms impulse response at 24 kHz is 7200 taps, and `np.convolve` against a 12-second
+    clip is some two billion multiply-adds. There is no scipy here, so the transform is
+    written out: two forward transforms, a multiply and an inverse.
+    """
+    total = signal.size + kernel.size - 1
+    size = 1 << (total - 1).bit_length()
+    spectrum = np.fft.rfft(signal, size) * np.fft.rfft(kernel, size)
+    return np.fft.irfft(spectrum, size)[:total].astype(np.float32)
+
+
+class RoomAcoustics(BaseModel):
+    """A small room's impulse response: a few early reflections and a decaying tail."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    reverb_ms: float = Field(
+        default=280.0,
+        gt=0.0,
+        le=2000.0,
+        description="Roughly RT60. A furnished Indian living room is 250-400 ms; much more "
+        "than that and it stops sounding like a home.",
+    )
+    mix: float = Field(
+        default=0.16,
+        ge=0.0,
+        le=1.0,
+        description="Wet level. Kept low because a phone mic is held close to the mouth, so "
+        "the direct sound dominates even in a live room.",
+    )
+    reflections: int = Field(default=7, ge=0, le=40)
+    seed: int = Field(default=20261105)
+
+    def impulse_response(self, sample_rate: int) -> Signal:
+        """Direct sound, then discrete early reflections, then a diffuse exponential tail."""
+        count = max(2, int(self.reverb_ms / 1000.0 * sample_rate))
+        rng = np.random.default_rng(self.seed)
+        response = np.zeros(count, dtype=np.float32)
+        response[0] = 1.0
+
+        # Early reflections are what tell a listener the size of the room; the tail only
+        # tells them how soft the furniture is.
+        for index in range(self.reflections):
+            delay = int((0.004 + 0.021 * rng.random()) * sample_rate * (1 + index * 0.6))
+            if delay >= count:
+                break
+            response[delay] += float(0.6 * np.exp(-index * 0.45) * rng.choice([-1.0, 1.0]))
+
+        decay = np.exp(-np.arange(count, dtype=np.float64) / (count / 4.5))
+        response += (_white(rng, count) * decay * 0.09).astype(np.float32)
+        energy = float(np.sqrt(np.sum(response**2)))
+        return (response / energy).astype(np.float32) if energy > 0.0 else response
+
+
+def room_reverb(samples: Signal, sample_rate: int, acoustics: RoomAcoustics) -> Signal:
+    """Place a dry voice in a room, keeping its length and its level."""
+    if samples.size == 0 or acoustics.mix <= 0.0:
+        return samples
+    response = acoustics.impulse_response(sample_rate)
+    wet = _fft_convolve(samples, response)[: samples.size]
+    dry_rms = _rms(samples)
+    wet_rms = _rms(wet)
+    if wet_rms > 0.0 and dry_rms > 0.0:
+        wet = wet * (dry_rms / wet_rms)
+    mixed: Signal = ((1.0 - acoustics.mix) * samples + acoustics.mix * wet).astype(np.float32)
+    return mixed
 
 
 def _rms(samples: npt.NDArray[np.float64] | Signal) -> float:

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.core.audio.call_profile import DEFAULT_ELDER_PROFILE, GRANDSON_PROFILE
 from app.core.models import PersonaId
 from app.core.tags import ELDER_TAGS, GRANDSON_TAGS, TIMBRE_V3_TAGS
 
@@ -32,10 +33,10 @@ class PersonaProfile(BaseModel):
         description="Timbre tags this persona may use. Anything else is stripped before "
         "synthesis, because unknown tags are billed and then silently discarded."
     )
-    aging_preset: str | None = Field(
-        default=None,
-        description="Name in app.core.audio.aging.AGING_PRESETS, or None for no processing. "
-        "Timbre has no elderly voice, so the elder personas are post-processed.",
+    call_profile: str = Field(
+        description="Name in app.core.audio.call_profile.PROFILES_BY_NAME. Bundles the voice "
+        "ageing, the room and the phone line, because all three are part of how a character "
+        "sounds and picking them separately produces mismatched combinations."
     )
     voice_setting: str = Field(
         description="Settings attribute holding the Timbre voice name. The voice is chosen "
@@ -56,7 +57,7 @@ RELAY: tuple[PersonaProfile, ...] = (
         display_name="Dada",
         prompt_file="dada.v1.md",
         allowed_tags=ELDER_TAGS,
-        aging_preset="classic",
+        call_profile=DEFAULT_ELDER_PROFILE,
         voice_setting="persona_elder_voice",
     ),
     PersonaProfile(
@@ -64,7 +65,7 @@ RELAY: tuple[PersonaProfile, ...] = (
         display_name="Grandson",
         prompt_file="grandson.v1.md",
         allowed_tags=GRANDSON_TAGS,
-        aging_preset=None,
+        call_profile=GRANDSON_PROFILE.name,
         voice_setting="persona_grandson_voice",
     ),
 )

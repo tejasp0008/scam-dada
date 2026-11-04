@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from app.core.audio.aging import PRESETS_BY_NAME
+from app.core.audio.call_profile import PROFILES_BY_NAME
 from app.core.models import PersonaId
 from app.core.personas import (
     ETHICS_PROMPT_FILE,
@@ -74,14 +74,22 @@ class TestProfiles:
         assert profile.allowed_tags <= TIMBRE_V3_TAGS
 
     @pytest.mark.parametrize("profile", RELAY, ids=lambda p: p.persona_id.value)
-    def test_any_ageing_preset_named_actually_exists(self, profile: PersonaProfile) -> None:
-        if profile.aging_preset is not None:
-            assert profile.aging_preset in PRESETS_BY_NAME
+    def test_the_call_profile_named_actually_exists(self, profile: PersonaProfile) -> None:
+        assert profile.call_profile in PROFILES_BY_NAME
 
     def test_the_elder_is_aged_and_the_grandson_is_not(self) -> None:
         """Timbre has no elderly voice, and a 27-year-old does not need one."""
-        assert profile_for(PersonaId.DADA).aging_preset is not None
-        assert profile_for(PersonaId.GRANDSON).aging_preset is None
+        elder = PROFILES_BY_NAME[profile_for(PersonaId.DADA).call_profile]
+        grandson = PROFILES_BY_NAME[profile_for(PersonaId.GRANDSON).call_profile]
+        assert elder.aging.name != "none"
+        assert grandson.aging.name == "none"
+
+    def test_both_personas_are_in_the_same_room_on_the_same_line(self) -> None:
+        """They are passing one handset between them, so the room cannot change."""
+        elder = PROFILES_BY_NAME[profile_for(PersonaId.DADA).call_profile]
+        grandson = PROFILES_BY_NAME[profile_for(PersonaId.GRANDSON).call_profile]
+        assert elder.ambience == grandson.ambience
+        assert elder.telephony == grandson.telephony
 
     def test_personas_do_not_share_a_voice_setting(self) -> None:
         settings = [profile.voice_setting for profile in RELAY]
@@ -94,6 +102,7 @@ class TestProfiles:
                 display_name="x",
                 prompt_file="dada.v1.md",
                 allowed_tags=frozenset({"winks"}),
+                call_profile="mobile",
                 voice_setting="persona_elder_voice",
             )
 

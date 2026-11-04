@@ -443,3 +443,66 @@ chain applies to a cloned voice unchanged — so it is a post-submission questio
 biometric data. It never goes in the repo, it goes in a gitignored file referenced from
 `.env`, written consent is recorded alongside it, and the fact that a cloned elderly voice
 has obvious misuse potential is reason enough to keep it out of a public artifact.
+
+## 0019 — Three stages, in the order physics puts them
+*2026-11-05 · Phase 1.5*
+
+The first ageing attempt was ageing plus a band-pass, and it still sounded like filtered TTS.
+Band-limiting is only the first of the things a phone call does to audio, and a voice that
+has been through a 300–3400 Hz filter and nothing else is a studio recording with its ends
+trimmed. Four cues were missing, and `app/core/audio/` is now split by where in the physical
+chain each one belongs.
+
+**1. The voice** (`aging.py`) — pitch, tempo, tremble, and now:
+
+* **Aperiodic jitter.** The tremble was two incommensurate sinusoids, which never repeat
+  audibly but are still far too even to be a body — it read as a tremolo pedal. The modulator
+  is now 60% seeded random wander and 40% sinusoid.
+* **An audible inhale** before the first word. Synthetic speech begins from absolute
+  stillness, which nothing alive does. A listener never notices the breath; they notice its
+  absence.
+
+**2. The room** (`ambience.py`) — the bed, plus a short reverb. The reverb matters more than
+expected: without it the voice is dry and the bed sits *behind* it, which reads as "a
+recording with noise added" rather than as one place. Reverb is what glues them. 280 ms,
+16% wet — low, because a phone mic is held close to the mouth, so the direct sound dominates
+even in a live room.
+
+**3. The line** (`telephony.py`) — the part that was missing entirely:
+
+* **Handset colour.** A cheap electret capsule has a presence bump around 1–2 kHz.
+* **Carrier AGC.** Telephony compresses hard, which is why phone speech sounds flat and
+  close. An envelope-based compressor with a floor, so it chases speech and not the room tone.
+* **8 kHz narrowband.** Down to the G.711 rate and back. Not the same as band-limiting at
+  24 kHz: it brings the aliasing a real codec brings.
+* **mu-law companding.** Quantising to 8 bits on a log curve puts more quantisation noise on
+  loud samples than quiet ones, and that level-dependent grain is the single most recognisable
+  artefact of a landline. Verified by test: the error on a full-scale tone is >5× the error on
+  a quiet one.
+* **Packet loss with concealment.** A lost VoIP frame is replaced by a fading repeat of the
+  previous one, which is what a decoder does. A hole of true silence reads as an edit; a
+  repeat reads as a bad line.
+
+**`call_profile.py` exists because the order is audible, not for tidiness.** Three ways to get
+it wrong, each of which was easy to write and wrong to hear:
+
+* Room tone mixed *after* the carrier filter carries 50 Hz hum down a line that cannot pass
+  it. There is a test that fails on exactly this.
+* Reverb applied *after* the bed reverberates the ceiling fan — but the fan does not echo, it
+  *is* the echo. It is already a diffuse recording of a whole room.
+* Compression applied *after* companding pulls quantisation noise up into the gaps between
+  words instead of leaving it buried under speech.
+
+**The ladder.** Six profiles, cleanest first: `studio`, `aged-dry`, `landline`,
+`living-room`, `mobile`, `bad-line`. Each adds one thing, so the audition demonstrates what
+every stage contributes rather than only presenting a finished result. `studio` is a true
+control — no ageing, no room, no carrier filter.
+
+**A bug this found.** An empty utterance rendered a 440 ms breath and a burst of room tone
+out of nowhere: a failed synthesis would have made the persona audibly gasp and say nothing.
+Both stages now short-circuit on empty input.
+
+**Measured.** 0–145 ms per clip for a 13-second render, the WSOLA stretch still ~90% of it.
+Bed construction is 7–15 ms and happens once per call, not per utterance. Zero credits: the
+whole six-profile ladder rendered from one cached synthesis, and the run that produced it
+spent nothing at all.

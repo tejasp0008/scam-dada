@@ -13,10 +13,12 @@ from app.core.audio.aging import (
     AgingPreset,
     band_pass,
     band_pass_kernel,
+    inhale,
     peak_normalise,
     resample_rate,
     time_stretch,
     tremble,
+    wander,
 )
 
 RATE = 24000
@@ -168,7 +170,7 @@ class TestPresets:
     def test_the_speed_knob_changes_duration(self) -> None:
         voice = sine(220.0, 1.0)
         slow = PRESETS_BY_NAME["frail"].apply(voice, RATE)
-        plain = PRESETS_BY_NAME["phone-only"].apply(voice, RATE)
+        plain = PRESETS_BY_NAME["none"].apply(voice, RATE)
         assert slow.size > plain.size
 
     def test_the_pitch_knob_lowers_the_fundamental(self) -> None:
@@ -177,20 +179,111 @@ class TestPresets:
         # 0.91 of 220 Hz is ~200 Hz, and the band-pass leaves a 220 Hz tone audible.
         assert dominant_hz(aged) < 215.0
 
-    def test_phone_only_is_a_true_control(self) -> None:
-        """The audition needs one clip that isolates the band-pass from the ageing."""
-        preset = PRESETS_BY_NAME["phone-only"]
+    def test_none_is_a_true_control(self) -> None:
+        """The audition needs one preset that leaves the voice exactly as Timbre made it."""
+        preset = PRESETS_BY_NAME["none"]
         assert preset.pitch == 1.0
         assert preset.speed == 1.0
         assert preset.tremble_depth == 0.0
         assert preset.vibrato_cents == 0.0
+        assert preset.inhale_ms == 0.0
 
-    def test_lead_padding_lengthens_the_clip_at_both_ends(self) -> None:
+    def test_the_control_preset_only_normalises(self) -> None:
+        voice = sine(220.0, 0.5) * 0.3
+        out = PRESETS_BY_NAME["none"].apply(voice, RATE)
+        assert out.size == voice.size
+        assert dominant_hz(out) == pytest.approx(220.0, rel=0.01)
+
+    def test_ageing_does_not_band_limit(self) -> None:
+        """The carrier filter belongs to telephony now; ageing must not pre-empt it."""
+        out = PRESETS_BY_NAME["classic"].apply(sine(150.0, 1.0), RATE)
+        # A 150 Hz tone would be gone if a 300 Hz high-pass were still in this stage.
+        assert rms(out) > 0.05
+
+    @pytest.mark.parametrize("name", ["mild", "classic", "frail"])
+    def test_every_aged_preset_breathes_before_speaking(self, name: str) -> None:
+        """Synthetic speech starts from absolute stillness; nobody does that."""
+        preset = PRESETS_BY_NAME[name]
+        assert preset.inhale_ms > 0.0
         voice = sine(220.0, 0.5)
-        preset = PRESETS_BY_NAME["phone-only"]
-        padded = preset.apply(voice, RATE, lead_ms=200.0)
-        assert padded.size == pytest.approx(voice.size + 2 * 0.2 * RATE, rel=0.02)
+        out = preset.apply(voice, RATE)
+        head = out[: int(0.05 * RATE)]
+        assert rms(head) > 0.0
+
+    @pytest.mark.parametrize("name", ["mild", "classic", "frail"])
+    def test_every_aged_preset_wanders_rather_than_oscillating(self, name: str) -> None:
+        """A purely sinusoidal tremble reads as a tremolo pedal, not as age."""
+        assert PRESETS_BY_NAME[name].jitter > 0.0
 
     def test_a_preset_outside_the_declared_ranges_is_refused(self) -> None:
         with pytest.raises(ValueError):
             AgingPreset(name="silly", pitch=0.1, speed=1.0)
+
+
+class TestWander:
+    def test_it_stays_in_range_and_is_seeded(self) -> None:
+        first = wander(RATE, RATE, 4.0, np.random.default_rng(7))
+        second = wander(RATE, RATE, 4.0, np.random.default_rng(7))
+        assert np.array_equal(first, second)
+        assert float(np.max(np.abs(first))) == pytest.approx(1.0, rel=1e-5)
+
+    def test_a_different_seed_gives_a_different_drift(self) -> None:
+        assert not np.array_equal(
+            wander(RATE, RATE, 4.0, np.random.default_rng(1)),
+            wander(RATE, RATE, 4.0, np.random.default_rng(2)),
+        )
+
+    def test_the_drift_is_slow(self) -> None:
+        """It modulates a voice, so energy above a few Hz would be heard as noise."""
+        drift = wander(RATE * 2, RATE, 4.0, np.random.default_rng(3))
+        assert dominant_hz(drift) < 12.0
+
+    def test_nothing_requested_is_nothing_returned(self) -> None:
+        assert wander(0, RATE, 4.0, np.random.default_rng(1)).size == 0
+
+
+class TestInhale:
+    def test_it_has_the_requested_length_and_fades_in_and_out(self) -> None:
+        breath = inhale(RATE, duration_ms=300.0, rng=np.random.default_rng(1))
+        assert breath.size == pytest.approx(0.3 * RATE, rel=0.01)
+        edges = max(abs(float(breath[0])), abs(float(breath[-1])))
+        assert edges < float(np.max(np.abs(breath))) * 0.05
+
+    def test_it_sits_in_the_band_a_phone_can_carry(self) -> None:
+        breath = inhale(RATE, duration_ms=300.0, rng=np.random.default_rng(1))
+        assert 200.0 < dominant_hz(breath) < 2400.0
+
+    def test_it_is_seeded(self) -> None:
+        assert np.array_equal(
+            inhale(RATE, duration_ms=200.0, rng=np.random.default_rng(5)),
+            inhale(RATE, duration_ms=200.0, rng=np.random.default_rng(5)),
+        )
+
+    def test_zero_duration_is_no_breath(self) -> None:
+        assert inhale(RATE, duration_ms=0.0, rng=np.random.default_rng(1)).size == 0
+
+
+class TestJitter:
+    def test_jitter_changes_the_result(self) -> None:
+        voice = sine(440.0, 1.0)
+        even = tremble(voice, RATE, rate_hz=5.0, am_depth=0.2, vibrato_cents=20.0, jitter=0.0)
+        noisy = tremble(voice, RATE, rate_hz=5.0, am_depth=0.2, vibrato_cents=20.0, jitter=0.8)
+        assert not np.array_equal(even, noisy)
+
+    def test_jitter_is_reproducible_from_the_seed(self) -> None:
+        voice = sine(440.0, 0.5)
+        kwargs = {"rate_hz": 5.0, "am_depth": 0.2, "vibrato_cents": 20.0, "jitter": 0.7}
+        assert np.array_equal(
+            tremble(voice, RATE, seed=11, **kwargs),  # type: ignore[arg-type]
+            tremble(voice, RATE, seed=11, **kwargs),  # type: ignore[arg-type]
+        )
+        assert not np.array_equal(
+            tremble(voice, RATE, seed=11, **kwargs),  # type: ignore[arg-type]
+            tremble(voice, RATE, seed=12, **kwargs),  # type: ignore[arg-type]
+        )
+
+    def test_an_out_of_range_jitter_is_refused(self) -> None:
+        with pytest.raises(ValueError, match="jitter"):
+            tremble(
+                sine(440.0, 0.1), RATE, rate_hz=5.0, am_depth=0.1, vibrato_cents=0.0, jitter=2.0
+            )
