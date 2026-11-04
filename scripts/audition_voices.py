@@ -111,6 +111,13 @@ def main() -> int:
         default=None,
         help=f"override the room tone on every profile. One of {sorted(AMBIENCE_BY_NAME)}",
     )
+    parser.add_argument(
+        "--bed-db",
+        default=None,
+        help="comma-separated bed levels in dB under the voice, e.g. -22,-18,-15,-12,-9. "
+        "Renders one clip per level so how far the voice sits under the room can be chosen "
+        "by ear. This is the knob that masks synthesis artefacts.",
+    )
     parser.add_argument("--voices", help="comma-separated subset, e.g. Devansh,Prakash")
     parser.add_argument("--out", type=Path, default=Path("var/auditions/aged-male"))
     parser.add_argument("--text", default=AUDITION_LINE)
@@ -121,8 +128,8 @@ def main() -> int:
     if not settings.gnani_api_key:
         print("GNANI_API_KEY is not set in .env", file=sys.stderr)
         return 2
-    if not args.ladder and not args.aged:
-        print("nothing to do: pass --ladder, --aged, or both", file=sys.stderr)
+    if not args.ladder and not args.aged and not args.bed_db:
+        print("nothing to do: pass --ladder, --aged or --bed-db", file=sys.stderr)
         return 2
     if args.profile not in PROFILES_BY_NAME:
         print(f"unknown profile {args.profile!r}; have {sorted(PROFILES_BY_NAME)}", file=sys.stderr)
@@ -138,8 +145,32 @@ def main() -> int:
     else:
         voices = (LEAD_VOICE,)
 
+    levels: tuple[float, ...] = ()
+    if args.bed_db:
+        try:
+            levels = tuple(float(value) for value in args.bed_db.split(","))
+        except ValueError:
+            print(f"--bed-db wants numbers, got {args.bed_db!r}", file=sys.stderr)
+            return 2
+        if any(level > 0.0 for level in levels):
+            print("--bed-db values are dB *under* the voice, so they must be <= 0", file=sys.stderr)
+            return 2
+
     ladder = tuple(_with_room(p, args.room) for p in CALL_PROFILES) if args.ladder else ()
     chosen = _with_room(PROFILES_BY_NAME[args.profile], args.room) if args.aged else None
+    sweep: tuple[CallProfile, ...] = ()
+    if levels:
+        base = _with_room(PROFILES_BY_NAME[args.profile], args.room)
+        if base.ambience is None:
+            print(f"profile {base.name!r} has no room to set a level on", file=sys.stderr)
+            return 2
+        # Renamed by level, so the filenames say which is which without a lookup.
+        sweep = tuple(
+            base.with_room(base.ambience, level_db=level).model_copy(
+                update={"name": f"{base.name}-bed{level:+.0f}dB"}
+            )
+            for level in levels
+        )
 
     # The persona is only allowed six of the thirteen tags. Running the audition line through
     # the same filter the persona output will go through means the line cannot quietly use a
@@ -158,6 +189,9 @@ def main() -> int:
         print(f"Per-voice profile: {chosen.name}")
     if args.room:
         print(f"Room overridden to: {args.room}")
+    if sweep:
+        joined = ", ".join(f"{value:+.0f} dB" for value in levels)
+        print(f"Bed level sweep on {args.profile}: {joined}")
     print(
         f"Estimated cost: {estimate.credits:.3f} credits"
         f"{' (rate is a placeholder)' if estimate.estimated else ''}"
@@ -165,7 +199,7 @@ def main() -> int:
     )
 
     args.out.mkdir(parents=True, exist_ok=True)
-    return asyncio.run(_run(settings, voices, ladder, chosen, args.out, text))
+    return asyncio.run(_run(settings, voices, ladder, chosen, sweep, args.out, text))
 
 
 def _with_room(profile: CallProfile, room: str | None) -> CallProfile:
@@ -177,8 +211,12 @@ def _with_room(profile: CallProfile, room: str | None) -> CallProfile:
 
 def _describe(profile: CallProfile) -> str:
     parts = [f"age={profile.aging.name}", f"line={profile.telephony.name}"]
-    parts.append(f"room={profile.ambience.name}" if profile.ambience else "room=none")
+    if profile.ambience is not None:
+        parts.append(f"room={profile.ambience.name}@{profile.ambience.level_db:+.0f}dB")
+    else:
+        parts.append("room=none")
     parts.append("reverb" if profile.acoustics else "dry")
+    parts.append(f"peak={profile.output_peak:.2f}")
     return " ".join(parts)
 
 
@@ -187,6 +225,7 @@ async def _run(
     voices: tuple[str, ...],
     ladder: tuple[CallProfile, ...],
     chosen: CallProfile | None,
+    sweep: tuple[CallProfile, ...],
     out: Path,
     text: str,
 ) -> int:
@@ -250,7 +289,7 @@ async def _run(
             if fastest is None or first_byte_ms < fastest[1]:
                 fastest = (voice, first_byte_ms)
 
-            wanted = (*ladder, *((chosen,) if chosen is not None else ()))
+            wanted = (*ladder, *((chosen,) if chosen is not None else ()), *sweep)
             for profile in wanted:
                 if profile.ambience is not None and profile.ambience.name not in beds:
                     beds[profile.ambience.name] = AmbienceBed(profile.ambience, SAMPLE_RATE)

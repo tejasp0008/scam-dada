@@ -206,6 +206,24 @@ class AmbiencePreset(BaseModel):
         "does not repeat audibly, short enough to hold in memory for a whole call.",
     )
 
+    def generator_key(self) -> tuple[float, ...]:
+        """The fields that determine the loop itself.
+
+        `level_db` is deliberately not among them: the level is applied when the bed is
+        mixed, not when it is generated, so one generated bed serves every level. That is
+        what lets a level sweep reuse a single 12-second loop instead of rebuilding it per
+        clip.
+        """
+        return (
+            self.fan,
+            self.fan_rpm,
+            self.hum,
+            self.street,
+            self.floor,
+            self.seed,
+            self.loop_seconds,
+        )
+
     def layers(self) -> tuple[tuple[str, float], ...]:
         """Non-zero layers, for logging and for the audition's output."""
         named = (
@@ -262,18 +280,22 @@ class AmbienceBed:
         indices = (np.arange(count, dtype=np.int64) + int(offset)) % self._loop.size
         return self._loop[indices]
 
-    def mix_into(self, voice: Signal, offset: int = 0) -> Signal:
-        """Add the bed under `voice` at the preset's level, relative to the voice's RMS.
+    def mix_into(self, voice: Signal, offset: int = 0, level_db: float | None = None) -> Signal:
+        """Add the bed under `voice`, `level_db` below the voice's RMS.
 
         Relative to RMS rather than to peak: peak tracks the loudest plosive, so a
         peak-referenced bed gets quieter the more expressive the line is.
+
+        `level_db` defaults to the preset's own level. Passing it explicitly is how one
+        generated bed is reused at several levels.
         """
         if voice.size == 0:
             return voice
         voice_rms = _rms(voice)
         if voice_rms <= 0.0:
             return voice
-        gain = voice_rms * (10.0 ** (self.preset.level_db / 20.0))
+        level = self.preset.level_db if level_db is None else level_db
+        gain = voice_rms * (10.0 ** (level / 20.0))
         mixed: Signal = (voice + self.take(voice.size, offset) * gain).astype(np.float32)
         return mixed
 

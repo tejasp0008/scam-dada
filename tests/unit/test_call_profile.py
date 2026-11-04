@@ -10,6 +10,8 @@ from app.core.audio.call_profile import (
     CALL_PROFILES,
     DEFAULT_ELDER_PROFILE,
     GRANDSON_PROFILE,
+    PERSONA_BED_DB,
+    PERSONA_OUTPUT_PEAK,
     PROFILES_BY_NAME,
     CallProfile,
 )
@@ -49,8 +51,8 @@ class TestRegistry:
         assert [p.name for p in CALL_PROFILES] == [
             "studio",
             "aged-dry",
+            "landline-bare",
             "landline",
-            "living-room",
             "mobile",
             "bad-line",
         ]
@@ -67,7 +69,7 @@ class TestRegistry:
         assert not studio.telephony.band
 
     def test_the_finished_profiles_have_all_three_stages(self) -> None:
-        for name in ("living-room", "mobile", "bad-line"):
+        for name in ("landline", "mobile", "bad-line"):
             profile = PROFILES_BY_NAME[name]
             assert profile.aging.name != "none"
             assert profile.acoustics is not None
@@ -116,8 +118,15 @@ class TestRender:
         assert rms(result.audio[: int(0.2 * RATE)]) > 0.0
 
     def test_a_profile_without_ambience_leaves_the_lead_silent(self) -> None:
-        result = PROFILES_BY_NAME["landline"].render(voice(0.5), RATE, lead_ms=300.0)
+        result = PROFILES_BY_NAME["landline-bare"].render(voice(0.5), RATE, lead_ms=300.0)
         assert rms(result.audio[: int(0.2 * RATE)]) == pytest.approx(0.0, abs=1e-6)
+
+    def test_the_default_elder_voice_has_a_room(self) -> None:
+        """It was chosen by ear as the line *plus* the fan and the street, not the bare line."""
+        profile = PROFILES_BY_NAME[DEFAULT_ELDER_PROFILE]
+        assert profile.ambience is not None
+        assert profile.acoustics is not None
+        assert {name for name, _ in profile.ambience.layers()} >= {"fan", "street", "floor"}
 
     def test_the_bed_offset_changes_the_room_but_not_the_voice(self) -> None:
         profile = PROFILES_BY_NAME["mobile"]
@@ -168,13 +177,38 @@ class TestRender:
     def test_overriding_the_room_keeps_everything_else(self) -> None:
         """How a different room is auditioned: copy the profile, not edit the registry."""
         profile = PROFILES_BY_NAME["mobile"]
-        quiet = profile.model_copy(update={"ambience": AMBIENCE_BY_NAME["quiet-room"]})
+        quiet = profile.with_room(AMBIENCE_BY_NAME["quiet-room"])
         assert quiet.aging == profile.aging
         assert quiet.telephony == profile.telephony
+        assert quiet.acoustics == profile.acoustics
         assert not np.array_equal(
             quiet.render(voice(0.5), RATE, lead_ms=300.0).audio,
             profile.render(voice(0.5), RATE, lead_ms=300.0).audio,
         )
+
+    def test_raising_the_bed_level_makes_the_room_louder(self) -> None:
+        profile = PROFILES_BY_NAME["landline"]
+        assert profile.ambience is not None
+        quiet = profile.with_room(profile.ambience, level_db=-30.0)
+        loud = profile.with_room(profile.ambience, level_db=-12.0)
+        lead = int(0.4 * RATE)
+        quiet_lead = rms(quiet.render(voice(0.5), RATE, lead_ms=600.0).audio[:lead])
+        loud_lead = rms(loud.render(voice(0.5), RATE, lead_ms=600.0).audio[:lead])
+        assert loud_lead > quiet_lead * 2
+
+    def test_a_level_override_changes_nothing_but_the_level(self) -> None:
+        profile = PROFILES_BY_NAME["landline"]
+        assert profile.ambience is not None
+        louder = profile.with_room(profile.ambience, level_db=-14.0)
+        assert louder.ambience is not None
+        assert louder.ambience.level_db == -14.0
+        assert louder.ambience.model_copy(update={"level_db": profile.ambience.level_db}) == (
+            profile.ambience
+        )
+
+    def test_dropping_the_room_is_possible(self) -> None:
+        profile = PROFILES_BY_NAME["landline"]
+        assert profile.with_room(None).ambience is None
 
     def test_a_dry_profile_differs_from_a_reverberant_one(self) -> None:
         profile = PROFILES_BY_NAME["landline"]
@@ -186,3 +220,118 @@ class TestRender:
     def test_an_empty_utterance_does_not_crash(self) -> None:
         result = PROFILES_BY_NAME["mobile"].render(np.zeros(0, dtype=np.float32), RATE)
         assert result.audio.size == 0
+
+
+class TestVoiceLoudness:
+    def test_the_persona_profiles_sit_the_voice_low_against_the_room(self) -> None:
+        """A voice low against a noisy room is harder to examine for synthesis artefacts."""
+        for name in ("landline", "mobile", "bad-line"):
+            profile = PROFILES_BY_NAME[name]
+            assert profile.ambience is not None
+            assert profile.ambience.level_db == PERSONA_BED_DB
+            assert profile.output_peak == PERSONA_OUTPUT_PEAK
+
+    def test_the_persona_bed_is_closer_than_the_preset_default(self) -> None:
+        assert AMBIENCE_BY_NAME["fan-and-street"].level_db < PERSONA_BED_DB
+
+    def test_the_persona_bed_stops_short_of_drowning_the_voice(self) -> None:
+        """Past about -10 dB the scammer says he cannot hear, which raises hang-up risk."""
+        assert PERSONA_BED_DB <= -10.0
+
+    def test_output_peak_is_honoured(self) -> None:
+        profile = PROFILES_BY_NAME["landline"]
+        result = profile.render(voice(), RATE, lead_ms=300.0)
+        assert float(np.max(np.abs(result.audio))) == pytest.approx(profile.output_peak, rel=1e-4)
+
+    def test_a_lower_output_peak_makes_the_whole_call_quieter(self) -> None:
+        profile = PROFILES_BY_NAME["landline"]
+        loud = profile.model_copy(update={"output_peak": 0.9})
+        quiet = profile.model_copy(update={"output_peak": 0.3})
+        assert rms(quiet.render(voice(), RATE).audio) < rms(loud.render(voice(), RATE).audio)
+
+    def test_output_peak_does_not_change_the_voice_to_room_ratio(self) -> None:
+        """Which is why it is cosmetic: the receiver's AGC lifts both back together."""
+        profile = PROFILES_BY_NAME["landline"]
+        ratios = []
+        for peak in (0.3, 0.9):
+            result = profile.model_copy(update={"output_peak": peak}).render(
+                voice(), RATE, lead_ms=600.0
+            )
+            lead = rms(result.audio[: int(0.4 * RATE)])
+            whole = rms(result.audio)
+            ratios.append(lead / whole)
+        assert ratios[0] == pytest.approx(ratios[1], rel=0.02)
+
+    def test_an_output_peak_above_full_scale_is_refused(self) -> None:
+        base = PROFILES_BY_NAME["landline"]
+        with pytest.raises(ValueError):
+            CallProfile(
+                name="too-loud",
+                aging=base.aging,
+                telephony=base.telephony,
+                output_peak=1.4,
+            )
+
+
+class TestBedReuse:
+    def test_a_bed_is_reused_across_levels(self) -> None:
+        """The loop does not depend on the level, so a level sweep rebuilds nothing."""
+        profile = PROFILES_BY_NAME["landline"]
+        assert profile.ambience is not None
+        bed = AmbienceBed(profile.ambience, RATE)
+        louder = profile.with_room(profile.ambience, level_db=-10.0)
+        assert louder.ambience is not None
+        assert bed.preset.generator_key() == louder.ambience.generator_key()
+        # Reusing the bed must give the same answer as letting render build its own.
+        assert np.array_equal(
+            louder.render(voice(0.5), RATE, bed=bed, lead_ms=300.0).audio,
+            louder.render(voice(0.5), RATE, lead_ms=300.0).audio,
+        )
+
+    def test_the_generator_key_ignores_the_level_but_not_the_layers(self) -> None:
+        base = AMBIENCE_BY_NAME["fan-and-street"]
+        assert base.generator_key() == base.model_copy(update={"level_db": -5.0}).generator_key()
+        assert base.generator_key() != base.model_copy(update={"fan": 0.1}).generator_key()
+        assert base.generator_key() != base.model_copy(update={"seed": 99}).generator_key()
+
+
+class TestDeliveredRatio:
+    """What comes out, as opposed to what the dial says.
+
+    `level_db` sets the bed against the voice *before* the line. The carrier's AGC then lifts
+    quiet passages - which are bed-only - toward its target, so the ratio that actually
+    reaches the listener is several dB tighter than the nominal figure. That is what a real
+    AGC does and why phone calls sound noisy, but it means the dial is not calibrated to the
+    output and only a measurement is worth quoting.
+    """
+
+    @staticmethod
+    def _delivered_snr(profile: CallProfile) -> float:
+        result = profile.render(voice(3.0), RATE, lead_ms=800.0)
+        audio = result.audio
+        bed = audio[: int(0.4 * RATE)]
+        body = audio[int(1.0 * RATE) : -int(1.0 * RATE)]
+        hop = int(0.025 * RATE)
+        frames = body[: (body.size // hop) * hop].reshape(-1, hop)
+        energies = np.sqrt(np.mean(frames.astype(np.float64) ** 2, axis=1))
+        speech = float(energies[energies >= np.quantile(energies, 0.6)].mean())
+        return float(20 * np.log10(speech / rms(bed)))
+
+    def test_the_agc_tightens_the_ratio_below_the_nominal_level(self) -> None:
+        profile = PROFILES_BY_NAME["landline"]
+        assert profile.ambience is not None
+        nominal = -profile.ambience.level_db
+        assert self._delivered_snr(profile) < nominal
+
+    def test_a_closer_bed_still_means_a_tighter_delivered_ratio(self) -> None:
+        """Monotonic, even though not calibrated - the dial still points the right way."""
+        profile = PROFILES_BY_NAME["landline"]
+        assert profile.ambience is not None
+        far = self._delivered_snr(profile.with_room(profile.ambience, level_db=-22.0))
+        near = self._delivered_snr(profile.with_room(profile.ambience, level_db=-9.0))
+        assert near < far
+
+    def test_the_default_leaves_the_voice_clearly_above_the_room(self) -> None:
+        """Masking artefacts is the goal; a scammer saying "I cannot hear you" is not."""
+        delivered = self._delivered_snr(PROFILES_BY_NAME[DEFAULT_ELDER_PROFILE])
+        assert 6.0 < delivered < 16.0

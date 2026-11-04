@@ -506,3 +506,58 @@ Both stages now short-circuit on empty input.
 Bed construction is 7–15 ms and happens once per call, not per utterance. Zero credits: the
 whole six-profile ladder rendered from one cached synthesis, and the run that produced it
 spent nothing at all.
+
+## 0020 — The voice sits low against the room, and the room is on the landline
+*2026-11-05 · Phase 1.5*
+
+Two requests, one mechanism.
+
+**"In the landline voice add street and fan and room background."** `living-room` already was
+exactly that — the landline channel plus `fan-and-street` plus reverb — so the bed at −22 dB
+was evidently too quiet to register as present. The `landline` rung now carries the room
+itself, the old `living-room` name is gone, and a bare-channel rung survives as
+`landline-bare` so the ladder still isolates one change per step. `landline` is the default
+elder profile.
+
+**"Loudness of the person should be low so that it is difficult to detect whether it is AI."**
+Correct instinct, and worth being precise about which knob does it:
+
+* **Absolute output level does almost nothing.** The receiving handset's AGC lifts the voice
+  and the room back up together, so the ratio survives the channel and the loudness does not.
+  `output_peak` exists and is set to 0.62 on the persona profiles, but it is close to
+  cosmetic; a test asserts that changing it leaves the voice-to-room ratio untouched.
+* **The voice-to-room ratio is the knob that works.** A voice low against a fan and a street
+  gives a listener far less clean silence in which to hear a synthesis artefact. The persona
+  profiles moved from −22 dB to **−15 dB** (`PERSONA_BED_DB`).
+
+**The dial is not calibrated to the output, and only the measurement is worth quoting.**
+Nominal `level_db` is set against the voice *before* the line. The carrier AGC then lifts
+quiet passages — which are bed-only — toward its target, so the delivered ratio is several dB
+tighter than the nominal figure. Measured on the Devansh render, speech frames against the
+lead-in:
+
+| nominal `level_db` | delivered speech-to-room |
+|---|---|
+| −22 dB | 17.2 dB |
+| −18 dB | 13.2 dB |
+| **−15 dB (default)** | **10.2 dB** |
+| −12 dB | 7.1 dB |
+| −9 dB | 5.8 dB |
+
+Monotonic but offset by 5–7 dB, which is the AGC doing exactly what an AGC does. Three tests
+pin this: that the delivered ratio is below nominal, that it still moves the right way, and
+that the default stays in a 6–16 dB band.
+
+**Where the limit is, and it is not an audio limit.** Past roughly −10 dB nominal the scammer
+starts saying "hello, I cannot hear you". That *raises* hang-up risk, which is the thing
+feature 3 exists to minimise, so burying the voice further trades one detection risk for a
+worse one. −15 dB is the chosen compromise and `--bed-db` exists to revisit it by ear.
+
+**This does not affect transcription.** Our STT transcribes the scammer's audio, not our own
+output, so a closer bed costs nothing in accuracy. The one exception is the browser simulator
+when a speaker feeds the microphone, where our bed would reach our own VAD — a reason to use
+headphones for the demo recording, noted rather than engineered around.
+
+**Also fixed here:** bed generation is now decoupled from bed level. `AmbiencePreset.
+generator_key()` excludes `level_db` and `AmbienceBed.mix_into` takes the level as an
+argument, so an eleven-clip level sweep builds one 12-second loop instead of eleven.

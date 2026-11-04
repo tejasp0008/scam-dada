@@ -29,9 +29,10 @@ Built for the Great Indian AI Internship Challenge on Gnani's speech models.
 | **Room** | Synthetic ceiling fan, mains hum, street and room floor, plus a short reverb that puts the voice *in* the room rather than over it |
 | **Phone line** | Handset presence bump, carrier AGC, 8 kHz narrowband, G.711 mu-law companding, packet loss with concealment |
 | **Call profiles** | The three stages composed in the one order that is physically correct, as a six-rung ladder from `studio` to `bad-line` |
+| **Voice-to-room ratio** | The persona sits 10.2 dB above the room (measured, not nominal), which masks synthesis artefacts without making the caller ask him to speak up |
 | **Audio tags** | The 13-tag Timbre v3.0 catalogue, with a per-persona allowed set; unknown tags are billed and then discarded by the API, so they are stripped first |
 | **Personas** | Dada and grandson prompts, ethics block shared and digest-pinned, relay registry |
-| Tests | 363 offline + 64 contract, `ruff` and `mypy` clean (`mypy --strict` on `core` and `providers`) |
+| Tests | 379 offline + 64 contract, `ruff` and `mypy` clean (`mypy --strict` on `core` and `providers`) |
 
 Measured on the live APIs by `make smoke` (n=1 per provider, 2026-11-04):
 
@@ -130,7 +131,7 @@ cp .env.example .env     # then fill in GNANI_API_KEY and the LLM_* values
 make install             # venv on 3.11 + dev dependencies
 make up                  # postgres + redis
 make migrate             # apply the baseline schema
-make test                # 363 tests, offline, zero API cost
+make test                # 379 tests, offline, zero API cost
 make dev                 # api on http://localhost:8000
 ```
 
@@ -217,6 +218,14 @@ real limit.
   utterance is processed before the first byte goes out. Fillers will be rendered once at
   cache-write time; a chunk-wise stretch with one frame of lookahead is the fix if the
   per-utterance cost shows up in the live path.
+- **The bed's level dial is not calibrated to the output.** `level_db` is set against the
+  voice before the line; the carrier AGC then lifts the bed-only passages toward its target,
+  so the delivered speech-to-room ratio is 5–7 dB tighter than the nominal figure. The
+  default reads −15 dB nominal and measures 10.2 dB delivered. Only the measurement is
+  quoted anywhere, and three tests pin the relationship (DECISIONS 0020).
+- **A closer bed trades one risk for another.** Burying the voice masks synthesis artefacts,
+  but past about −10 dB nominal the scammer starts asking the persona to speak up, which
+  raises hang-up risk. −15 dB is a compromise chosen by ear, not an optimum.
 - **The room tone is generated, not recorded.** A fan, mains hum, traffic and a room floor
   from noise and sinusoids. It is convincing in a phone band, and it means no audio had to be
   sourced, licensed or committed — but it is not a real room, and a trained ear listening for
