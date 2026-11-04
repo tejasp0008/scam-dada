@@ -113,7 +113,7 @@ visible reason, is the worst possible time to learn it.
 ---
 
 ## 0007 — The budget guard counts raw units, not credits
-*2026-11-04 · Phase 0*
+*2026-11-04 · Phase 0 · **superseded by 0013**, once the dashboard showed credits are denominated in rupees*
 
 Gnani's docs publish no credit or rupee conversion anywhere; the limits page says rates live
 in the account console. The programme grants 5,000 credits of unstated denomination.
@@ -230,3 +230,97 @@ byte count.
 "scammer minutes wasted" counter, the STT seconds the budget guard charges, and any ffmpeg
 operation in Phase 5. All three would have been wrong by four orders of magnitude, and the
 counter is a number shown to judges.
+
+---
+
+## 0012 — Prisma does not emit `processing`, so filler timing comes from the local VAD
+*2026-11-04 · measured against the live streaming API*
+
+The docs list `processing` among the server events ("speech end detected; transcription
+started"), and decision 0002 assumed it as the cue to start a filler phrase while the LLM
+thinks. A real streaming session, at real-time cadence, with
+`model=prisma-v3.0 format=transliterate language_code=indic-auto`, emitted:
+
+```
+ready > speech_start > transcript
+```
+
+No `processing`, across both transcript segments. The smoke script now prints the observed
+event sequence on every run so this stays visible rather than becoming folklore.
+
+**Consequence.** There is no server-side signal that the speaker has *stopped*, only that
+they *started* (`speech_start`) and, later, what they said (`transcript`). So the filler
+phrase cannot be scheduled from a server event. In Phase 2 it fires from the local
+`EnergyVad` closing its gate after `silence_frames_to_close`, which is the only
+end-of-speech signal we actually have. This makes the local VAD load-bearing for turn-taking
+as well as for barge-in — a bigger role than decision 0003 gave it.
+
+**Also measured.** Recognition latency can therefore only be bounded, not isolated: the
+smoke script reports `speech_start -> transcript` (1208 ms on a 3.3 s clip) alongside the
+`latency` figure Prisma itself reports per segment (69 ms). The two measure different things
+and the gap is mostly the speaker still talking, which is why the honest label is
+`speech_start->text` rather than anything that implies endpointing delay.
+
+---
+
+## 0013 — Spend is tracked in credits, with raw units kept alongside
+*2026-11-04 · supersedes 0007*
+
+Decision 0007 capped raw units because the docs publish no conversion. The usage dashboard
+then showed what the docs do not: credits are denominated in rupees (5,000 granted, ₹0.17
+spent over six requests, so 1 credit = ₹1), and **STT is billed in minutes, rounded up** —
+each ~2.7 s call was logged as 0.05 minutes.
+
+**Decision.** `app/core/cost.py` prices every call: raw measurement → billed units →
+credits. The guard's ceiling is in credits, defaulting to a 5,000 total with a hard stop at
+4,500 used. Two independent pools are tracked, because they are two wallets: Gnani's
+programme credits, and the LLM vendor's own billing.
+
+**Three things this gets right that a naive implementation would not:**
+
+*Rounding is modelled, not divided.* 2.7 s of audio costs the same as 3.0 s. Treating STT
+as per-second would have understated a chatty call by over 10%, and the error compounds
+across hundreds of short utterances in a long scambait. The increment and the minimum are
+both config values.
+
+*Raw units are stored next to credits.* `api_usage` keeps `raw_units` (seconds, characters,
+tokens) as well as `billed_units` and `credits`. The rates are currently **placeholders
+inferred from a six-request sample**, so when the real rates arrive every historical credit
+figure can be re-derived from the measurements rather than being lost. Until
+`RATES_CONFIRMED=true`, every charge carries `estimated=True` and the smoke script says so
+in its header — no inferred number can be mistaken for a fact.
+
+*The pools do not mix.* Groq spend hitting the Gnani ceiling would hide a real limit and
+stop a call for the wrong reason. The LLM pool has no credit rate yet, so it is constrained
+by its token ceiling instead.
+
+**Cost.** This replaced the `api_usage` schema outright (migration 0002) rather than
+evolving it: an integer `units` column cannot hold 0.05 minutes, and the table held only
+throwaway smoke rows.
+
+---
+
+## 0014 — A fallback model, but only before the first token
+*2026-11-04 · Phase 1*
+
+`qwen/qwen3.8-27b` is a Groq **preview** model. It is the fastest to first token by 2.3×
+and the best at Hinglish, so it is worth running, but a preview model can be withdrawn or
+throttled without notice — and the dialogue path is the one place where a 404 means the
+scammer hears silence.
+
+**Decision.** `FallbackLLM` wraps the primary and switches to `openai/gpt-oss-120b` when the
+primary errors, stalls past `LLM_FIRST_TOKEN_TIMEOUT_S` (3 s), or yields an empty stream.
+The fallback is configured with `reasoning_effort: low`, a plain-text system instruction,
+and backtick stripping.
+
+**The constraint that shapes it: fallback only before the first token.** Once a piece of
+text has been handed to the caller, the persona has begun speaking that sentence. Switching
+then would splice the first half of Qwen's reply onto the second half of a different model's
+reply, mid-utterance. So a failure after the first token propagates instead, and the
+orchestrator degrades to a cached filler. There is a contract test pinning exactly this.
+
+**Why the fallback needs its own configuration.** Measured, not assumed: `gpt-oss` on
+default settings returns HTTP 200 with no content at all — the whole budget goes to
+reasoning tokens — and with effort set low it still occasionally emits markdown fences into
+text that is about to be spoken aloud. An empty completion is therefore treated as a
+failure, and backticks are stripped from the stream.

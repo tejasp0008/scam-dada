@@ -22,6 +22,8 @@ from typing import Literal, Protocol, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.core.cost import Charge, CostModel, UnitType
+
 # ---------------------------------------------------------------------------
 # Errors
 # ---------------------------------------------------------------------------
@@ -80,33 +82,27 @@ class BudgetExceeded(ProviderError):
 # ---------------------------------------------------------------------------
 
 
-class UnitType(StrEnum):
-    """Billable units we can actually count.
-
-    Gnani publishes no credit conversion, so the budget guard caps raw units rather than
-    pretending to know the rupee or credit cost.
-    """
-
-    TTS_CHARS = "tts_chars"
-    STT_SECONDS = "stt_seconds"
-    LLM_TOKENS = "llm_tokens"
-
-
 class UsageRecorder(Protocol):
     """Port implemented by the budget guard in `app.infra`.
 
-    Declared here so providers depend on an interface they own rather than on infra.
+    Declared here so adapters depend on an interface they own rather than on infra. Charges
+    are priced by `app.core.cost` before they arrive here, so an adapter never needs to know
+    a rate: it reports what it measured and the cost model does the conversion.
     """
 
-    async def check(self, provider: str, unit: UnitType, units: int) -> None:
-        """Raise `BudgetExceeded` if spending `units` would breach the configured ceiling."""
+    @property
+    def cost(self) -> CostModel:
+        """The rates in force, so an adapter can price what it is about to spend."""
+        ...
+
+    async def check(self, provider: str, charge: Charge) -> None:
+        """Raise `BudgetExceeded` if this charge would breach the pool's ceiling."""
         ...
 
     async def record(
         self,
         provider: str,
-        unit: UnitType,
-        units: int,
+        charge: Charge,
         *,
         call_id: str | None = None,
         cache_hit: bool = False,
@@ -146,6 +142,9 @@ class SttConfig(BaseModel):
     )
     min_silence_ms: int | None = Field(default=None, ge=1)
     vad_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    call_id: str | None = Field(
+        default=None, description="Attributes usage rows to a call; not sent upstream."
+    )
 
 
 class SttEventKind(StrEnum):
@@ -251,7 +250,10 @@ class SttSession(Protocol):
 class STTProvider(Protocol):
     """Opens transcription sessions."""
 
-    name: str
+    @property
+    def name(self) -> str:
+        """Vendor identifier used in logs and usage rows."""
+        ...
 
     async def open_session(self, config: SttConfig) -> SttSession:
         """Connect and return a session ready for audio."""
@@ -278,6 +280,9 @@ class TtsRequest(BaseModel):
     model: str
     speed: float = Field(default=1.0, gt=0.0)
     sample_rate: int = 24000
+    call_id: str | None = Field(
+        default=None, description="Attributes usage rows to a call; not sent upstream."
+    )
 
 
 class AudioChunk(BaseModel):
@@ -293,7 +298,10 @@ class AudioChunk(BaseModel):
 class TTSProvider(Protocol):
     """Streams synthesised speech."""
 
-    name: str
+    @property
+    def name(self) -> str:
+        """Vendor identifier used in logs and usage rows."""
+        ...
 
     def synthesize(self, request: TtsRequest) -> AsyncIterator[AudioChunk]:
         """Yield PCM chunks as they are produced. First chunk latency is what matters."""
@@ -329,7 +337,10 @@ class LLMProvider(Protocol):
     anything until it validates.
     """
 
-    name: str
+    @property
+    def name(self) -> str:
+        """Vendor identifier used in logs and usage rows."""
+        ...
 
     def stream_chat(
         self,
@@ -352,3 +363,43 @@ class LLMProvider(Protocol):
     ) -> SchemaT:
         """Return a validated instance of `schema`, raising `BadRequest` if it never validates."""
         ...
+
+
+__all__ = [  # noqa: RUF022 - grouped by concern, not alphabetised
+    # errors
+    "ProviderError",
+    "AuthError",
+    "OutOfCredit",
+    "RateLimited",
+    "UpstreamTimeout",
+    "ProviderUnavailable",
+    "BadRequest",
+    "TranscriptionFailed",
+    "SynthesisFailed",
+    "BudgetExceeded",
+    # usage
+    "Charge",
+    "CostModel",
+    "UnitType",
+    "UsageRecorder",
+    # stt
+    "STTProvider",
+    "SttSession",
+    "SttConfig",
+    "SttEvent",
+    "SttEventKind",
+    "SttReady",
+    "SttSpeechStart",
+    "SttProcessing",
+    "SttTranscript",
+    "SttStreamError",
+    # tts
+    "TTSProvider",
+    "TtsRequest",
+    "AudioChunk",
+    # llm
+    "LLMProvider",
+    "ChatMessage",
+    "Role",
+    "SchemaT",
+]

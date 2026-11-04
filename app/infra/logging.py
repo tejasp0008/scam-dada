@@ -84,5 +84,8 @@ def configure_logging(level: str = "INFO") -> None:
     root = logging.getLogger()
     root.handlers = [handler]
     root.setLevel(level.upper())
-    # Uvicorn's access log duplicates what our route handlers already report.
+    # Uvicorn's access log duplicates what our route handlers already report, and httpx
+    # logs one INFO line per request, which on the audio path is one per TTS chunk batch.
     logging.getLogger("uvicorn.access").propagate = False
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)

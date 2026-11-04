@@ -1,0 +1,12 @@
+event: start
+data: {"status": "started", "text": "Haan beta, <sigh> kaun bol raha hai?"}
+
+event: chunk
+data: {"chunk_index": 0, "audio": "AAAQACAAMAA=", "is_final": false}
+
+event: chunk
+data: {"chunk_index": 1, "audio": "AAAQACAAMAA=", "is_final": false}
+
+event: complete
+data: {"chunk_index": 2, "audio": "", "is_final": true}
+

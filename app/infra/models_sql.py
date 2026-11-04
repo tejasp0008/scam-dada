@@ -146,10 +146,15 @@ class CanaryMatch(Base):
 
 
 class ApiUsage(Base):
-    """One row per outbound provider call, including cache hits at zero units.
+    """One row per outbound provider call, including cache hits at zero cost.
 
-    Cache hits are recorded rather than skipped so "credits saved by caching" is a measured
-    number instead of a claim.
+    Both the raw measurement and the billed quantity are stored. Gnani bills STT in
+    rounded-up minutes, so 2.7 seconds of audio is 0.05 billed minutes: keeping the seconds
+    as well as the minutes is what lets the credit figures be re-derived if a rate turns out
+    to be wrong, and lets the rounding overhead be quantified.
+
+    Cache hits are recorded rather than skipped, with what the call would have cost in
+    `avoided_credits`, so "caching saved credits" is a measured number instead of a claim.
     """
 
     __tablename__ = "api_usage"
@@ -162,6 +167,13 @@ class ApiUsage(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     provider: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
-    unit_type: Mapped[str] = mapped_column(String(16), nullable=False)
-    units: Mapped[int] = mapped_column(Integer, nullable=False)
+    pool: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    raw_unit: Mapped[str] = mapped_column(String(16), nullable=False)
+    raw_units: Mapped[float] = mapped_column(Float, nullable=False)
+    billed_unit: Mapped[str] = mapped_column(String(16), nullable=False)
+    billed_units: Mapped[float] = mapped_column(Float, nullable=False)
+    credits: Mapped[float] = mapped_column(Float, nullable=False)
+    #: True when the rate used was still a placeholder, so no estimate is ever read as fact.
+    credits_estimated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    avoided_credits: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     cache_hit: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

@@ -9,6 +9,8 @@ garbled transcripts hours later, so they get tested directly.
 
 from __future__ import annotations
 
+import struct
+
 import numpy as np
 import numpy.typing as npt
 
@@ -90,3 +92,27 @@ def resample_linear(
     src_idx = np.arange(samples.size, dtype=np.float32)
     dst_idx = np.linspace(0.0, samples.size - 1, out_count, dtype=np.float32)
     return np.interp(dst_idx, src_idx, samples).astype(np.float32)
+
+
+def pcm_to_wav(pcm: bytes, sample_rate: int, channels: int = 1) -> bytes:
+    """Wrap raw PCM s16le in a WAV container with a header that tells the truth.
+
+    We write this ourselves rather than asking the provider for `container=wav`, because
+    Timbre ships a 0xFFFFFFFF streaming placeholder as the data size even in a complete
+    response: a 2.68-second clip then reads as 24.8 hours to anything that trusts the
+    header, including ffmpeg and Python's own `wave`. Duration feeds the minutes-wasted
+    counter and the STT billing estimate, so it has to be right.
+    """
+    if sample_rate <= 0:
+        raise ValueError("sample_rate must be positive")
+    if channels <= 0:
+        raise ValueError("channels must be positive")
+    bits_per_sample = 16
+    byte_rate = sample_rate * channels * bits_per_sample // 8
+    block_align = channels * bits_per_sample // 8
+    header = b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVE"
+    header += b"fmt " + struct.pack(
+        "<IHHIIHH", 16, 1, channels, sample_rate, byte_rate, block_align, bits_per_sample
+    )
+    header += b"data" + struct.pack("<I", len(pcm))
+    return header + pcm

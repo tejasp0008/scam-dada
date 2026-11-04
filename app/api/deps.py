@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Annotated
 
+import httpx
 from fastapi import Depends, Request
 from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -30,6 +31,7 @@ class AppResources:
     engine: AsyncEngine
     session_factory: async_sessionmaker[AsyncSession]
     redis: Redis
+    http: httpx.AsyncClient
     bus: EventBus
     budget: BudgetGuard
     stt: STTProvider

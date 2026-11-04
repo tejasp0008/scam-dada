@@ -1,0 +1,6 @@
+data: {"choices": [{"delta": {"role": "assistant"}}]}
+
+data: {"choices": [], "usage": {"total_tokens": 86}}
+
+data: [DONE]
+

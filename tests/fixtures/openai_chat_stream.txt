@@ -1,0 +1,10 @@
+data: {"choices": [{"delta": {"content": "Arre "}}]}
+
+data: {"choices": [{"delta": {"content": "beta, "}}]}
+
+data: {"choices": [{"delta": {"content": "kaun?"}}]}
+
+data: {"choices": [], "usage": {"prompt_tokens": 90, "completion_tokens": 12, "total_tokens": 102}}
+
+data: [DONE]
+

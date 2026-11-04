@@ -6,11 +6,13 @@ The only global in the project. Everything else is injected.
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field, PostgresDsn, RedisDsn
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.providers.factory import ProviderName
+from app.core.cost import CostModel
+from app.providers.names import ProviderName
 
 
 class Settings(BaseSettings):
@@ -56,17 +58,66 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = ""
     llm_analysis_model: str = ""
+    # The dialogue model is a Groq preview model, which can be withdrawn or throttled
+    # without notice, so a second model is always configured. Measured in DECISIONS 0010.
+    llm_fallback_model: str = "openai/gpt-oss-120b"
+    llm_fallback_reasoning_effort: str = "low"
+    # If the primary has produced no token by now, switch. A scammer hears dead air.
+    llm_first_token_timeout_s: float = 3.0
+    llm_request_timeout_s: float = 30.0
 
-    # Gnani publishes no credit conversion, so ceilings are in raw units.
+    # ---- Budget ----
     budget_enabled: bool = True
-    budget_max_tts_chars: int = 200_000
-    budget_max_stt_seconds: int = 7_200
-    budget_max_llm_tokens: int = 2_000_000
+
+    # Gnani programme credits, denominated in rupees (1 credit = ₹1). The hard stop sits
+    # short of the balance so there is always enough left to re-record the demo.
+    gnani_credit_total: float | None = 5_000.0
+    gnani_credit_stop_at: float | None = 4_500.0
+
+    # The LLM vendor bills separately and does not touch Gnani credits. Its total is
+    # unknown, so the token ceiling below is what actually constrains it.
+    llm_credit_total: float | None = None
+    llm_credit_stop_at: float | None = None
+
+    # Raw-unit ceilings: a second line of defence, and the only usable ceiling for a pool
+    # whose rate is not yet known. None disables one.
+    budget_max_tts_chars: int | None = 200_000
+    budget_max_stt_seconds: int | None = 7_200
+    budget_max_llm_tokens: int | None = 2_000_000
+
+    # ---- Rates ----
+    # Placeholders inferred from a six-request sample on the usage dashboard. Every charge
+    # priced with these is flagged estimated=True until rates_confirmed is set.
+    rates_confirmed: bool = False
+    stt_rate_per_minute: float = 0.45
+    stt_billing_increment_minutes: float = 0.05
+    stt_minimum_billed_minutes: float = 0.05
+    tts_rate_per_1k_chars: float = 1.58
+    llm_rate_per_1m_tokens: float = 0.0
+
+    # ---- Local storage ----
+    var_dir: Path = Path("var")
+
+    @property
+    def tts_cache_dir(self) -> Path:
+        """Where synthesised audio is cached by content hash."""
+        return self.var_dir / "tts_cache"
 
     @property
     def sqlalchemy_url(self) -> str:
         """The database URL as a plain string, which SQLAlchemy wants."""
         return str(self.database_url)
+
+    def cost_model(self) -> CostModel:
+        """Build the cost model from the configured rates."""
+        return CostModel(
+            stt_rate_per_minute=self.stt_rate_per_minute,
+            stt_billing_increment_minutes=self.stt_billing_increment_minutes,
+            stt_minimum_billed_minutes=self.stt_minimum_billed_minutes,
+            tts_rate_per_1k_chars=self.tts_rate_per_1k_chars,
+            llm_rate_per_1m_tokens=self.llm_rate_per_1m_tokens,
+            rates_confirmed=self.rates_confirmed,
+        )
 
     @property
     def analysis_model(self) -> str:

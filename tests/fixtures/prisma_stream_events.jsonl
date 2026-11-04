@@ -1,0 +1,6 @@
+{"type": "connected", "message": "ready", "timestamp": "2026-11-04T18:00:00Z", "request_id": "01a1a7a8-4bd2-751f-bc7c-a685cce28f2e", "config": {"sample_rate": 16000, "chunk_size": 512, "language_code": "indic-auto", "format": "transliterate"}}
+{"type": "speech_start", "timestamp": "2026-11-04T18:00:01Z", "utterance_id": "u-1"}
+{"type": "transcript", "timestamp": "2026-11-04T18:00:02Z", "text": "haan beta", "is_final": true, "segment_id": "req-seg-1", "segment_index": 1, "utterance_id": "u-1", "audio_duration_ms": 900, "latency": 69.4}
+{"type": "transcript", "timestamp": "2026-11-04T18:00:03Z", "text": "Kaun bol raha hai?", "is_final": true, "segment_id": "req-seg-2", "segment_index": 2, "utterance_id": "u-2", "audio_duration_ms": 1400, "latency": 70}
+{"type": "settings_updated", "timestamp": "2026-11-04T18:00:04Z", "config": {"language_code": "indic-auto", "format": "transliterate"}}
+{"type": "error", "timestamp": "2026-11-04T18:00:05Z", "message": "segment failed"}

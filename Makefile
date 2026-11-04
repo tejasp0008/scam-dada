@@ -1,4 +1,4 @@
-.PHONY: help install up down logs migrate revision lint fmt types test test-contract check dev
+.PHONY: help install up down logs migrate revision lint fmt types test test-contract check dev smoke audition
 
 help:
 	@grep -E '^[a-z-]+:.*?##' $(MAKEFILE_LIST) | sed 's/:.*##/\t/'
@@ -42,3 +42,9 @@ test-contract:  ## Adapter tests against recorded payloads, still no network
 	.venv/bin/pytest -m contract
 
 check: lint types test test-contract  ## Everything that gates a phase
+
+smoke:  ## Hit every real provider once end to end; prints latency and credits spent
+	.venv/bin/python scripts/smoke.py
+
+audition:  ## Synthesise one line in every Timbre v3.0 voice so you can pick Dadi's
+	.venv/bin/python scripts/audition_voices.py

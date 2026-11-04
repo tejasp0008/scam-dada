@@ -7,31 +7,45 @@ an evidence pack.
 
 Built for the Great Indian AI Internship Challenge on Gnani's speech models.
 
-> **Status: Phase 0 complete.** Scaffold, schema, event model, pure audio layer and offline
-> mock providers. The real Gnani adapters land in Phase 1. Nothing in this README is a
-> claimed capability unless it is listed as done below.
+> **Status: Phase 1 complete.** The three provider adapters work against the live APIs.
+> Nothing in this README is a claimed capability unless it is listed as done below.
 
 ## What works today
 
 | | |
 |---|---|
 | Scaffold | FastAPI app, Docker Compose (api + postgres + redis), JSON logging with `call_id` |
-| Schema | 7 tables, one Alembic baseline, verified against Postgres 16 with no ORM drift |
+| Schema | 7 tables, two Alembic migrations, verified against Postgres 16 with no ORM drift |
 | Event model | 8 typed events behind a discriminated union, round-trip tested |
 | Audio layer | 48k→16k resampling, 1024-byte framing, energy VAD with hysteresis — all pure and tested |
-| Providers | Three `Protocol` ports; deterministic offline mocks for all of them |
-| Tests | 117 passing, `ruff` and `mypy` clean (`mypy --strict` on `core` and `providers`) |
+| **Prisma v3.0 STT** | Streaming WebSocket adapter: upgrade headers, exact 1024-byte frames, VAD events, usage metering, 15-minute cap surfaced for rotation |
+| **Timbre v3.0 TTS** | SSE adapter returning raw PCM, inline audio tags, four error shapes normalised |
+| **LLM** | OpenAI-compatible adapter, streaming + validated JSON, automatic fallback to a second model |
+| **TTS cache** | Content-hash cache; hits cost nothing and record what they avoided |
+| **Budget guard** | Credits (₹) per pool with a hard stop, raw units kept for auditability |
+| Tests | 156 offline + 64 contract, `ruff` and `mypy` clean (`mypy --strict` on `core` and `providers`) |
 
-Not built yet: the Gnani adapters, the orchestrator, personas, the intelligence layer, the
-dashboard and the evidence pack. See [PLAN.md](PLAN.md) for the phase plan and
+Measured on the live APIs by `make smoke` (n=1 per provider, 2026-11-04):
+
+| leg | latency |
+|---|---|
+| Timbre first audio byte | 304 ms |
+| Timbre cached replay | 4 ms |
+| Prisma `speech_start` → transcript (3.3 s clip) | 1208 ms; Prisma self-reports 69 ms per segment |
+| LLM first token (`qwen/qwen3.8-27b`) | 174–380 ms over three runs |
+| LLM validated JSON (`openai/gpt-oss-120b`) | 762–1769 ms |
+| Fallback recovery after a 404 | 595–813 ms |
+
+Not built yet: the orchestrator, personas, the intelligence layer, the dashboard and the
+evidence pack. See [PLAN.md](PLAN.md) for the phase plan and
 [docs/DECISIONS.md](docs/DECISIONS.md) for why the architecture looks like this.
 
 ## Which Gnani models are used, and where
 
 | Model | Role | Where |
 |---|---|---|
-| **Prisma v3.0** | Streaming speech-to-text | `app/providers/gnani_prisma.py` (Phase 1). `indic-auto` so a scammer switching language mid-call still transcribes. |
-| **Timbre v3.0** | Expressive text-to-speech | `app/providers/gnani_timbre.py` (Phase 1). v3.0 specifically, because inline audio tags (`<sigh>`, `<pauses>`, `<whispers>`) only work on v3.0 — v2.5 strips them silently. `language=hi-en` for Hinglish. |
+| **Prisma v3.0** | Streaming speech-to-text | [`app/providers/gnani_prisma.py`](app/providers/gnani_prisma.py). `language_code=indic-auto` so a scammer switching language mid-call still transcribes, and `format=transliterate` because it was the only format that returned Latin-script Hinglish intact — see DECISIONS 0009. |
+| **Timbre v3.0** | Expressive text-to-speech | [`app/providers/gnani_timbre.py`](app/providers/gnani_timbre.py). v3.0 specifically, because inline audio tags (`<sigh>`, `<pauses>`, `<whispers>`) only work on v3.0 — v2.5 strips them silently. `language=hi-en` for Hinglish, over SSE, as headerless raw PCM. |
 | **Evon v3.3** | Dialogue and analysis LLM | **Not used — it is not reachable.** Gnani's FAQ says Evon is not on the API platform (open weights by request on Hugging Face). The Agent Builder's model list returns Claude, GPT-4.1-mini, GPT-4o-mini and Gnani's "Pampa" models, no Evon, and it is a selector for agents rather than a completions endpoint. The LLM therefore sits behind `LLMProvider` with an OpenAI-compatible adapter; pointing it at Evon is one environment variable. |
 
 ## Architecture
@@ -126,6 +140,8 @@ surprise on stage.
 |---|---|
 | `make test` | Unit + integration, offline, no credits spent |
 | `make test-contract` | Adapters against recorded sample payloads, still offline |
+| `make smoke` | **Spends credits.** One real call per provider end to end; prints latency and cost |
+| `make audition` | **Spends credits.** One line in every Timbre v3.0 voice, so you can pick a persona's voice by ear |
 | `make lint` / `make fmt` / `make types` | `ruff` and `mypy` |
 | `make check` | Everything that gates a phase |
 | `make revision m="..."` | Autogenerate a migration |
@@ -148,11 +164,17 @@ logged run and is reported with its sample size. The "117 tests passing" above i
 of `make test` at the Phase 0 commit.
 
 **Credit discipline.** Every TTS output is cached by content hash and never re-synthesised.
-The budget guard counts raw units — TTS billable characters including tag characters, STT
-audio seconds, LLM tokens — and refuses calls past a configurable ceiling. Cache hits are
-recorded as zero-unit rows so "credits saved by caching" is measured rather than claimed.
-Gnani publishes no credit conversion, so the guard deliberately does not pretend to know
-the rupee cost.
+The budget guard tracks spend in credits (₹1 each) against a configurable total with a hard
+stop that sits short of the balance, so there is always credit left to re-record the demo.
+STT is modelled as **billed minutes with rounding**, not raw seconds, because Gnani rounds a
+2.7-second call up to 0.05 minutes. Raw units are stored next to every credit figure so the
+conversion stays verifiable.
+
+The rates themselves are **placeholders inferred from a six-request sample** until
+`RATES_CONFIRMED=true` is set, and until then every charge is flagged `estimated=True` and
+the smoke script says so in its header. Gnani's own pool and the LLM vendor's are tracked
+separately, because Groq spend does not consume Gnani credits and mixing them would hide a
+real limit.
 
 ## Known limitations
 
@@ -163,6 +185,14 @@ the rupee cost.
 - **Prisma returns no partial transcripts** (`is_final` is always true), so turn-taking relies
   on its VAD events rather than stabilising partials. Barge-in therefore uses a local energy
   VAD; see [docs/DECISIONS.md](docs/DECISIONS.md) 0002 and 0003.
+- **Prisma was not observed to emit the documented `processing` event.** A live session
+  produced `ready > speech_start > transcript` only. There is therefore no server-side
+  end-of-speech signal, and filler-phrase timing has to come from the local VAD closing its
+  gate (DECISIONS 0012). The smoke script prints the observed event sequence on every run.
+- **The credit rates are estimates.** See the credit-discipline note above.
+- **The dialogue model is a Groq preview model.** `qwen/qwen3.8-27b` can be withdrawn without
+  notice, so a fallback to `openai/gpt-oss-120b` is wired in — but only before the first
+  token, because switching mid-sentence would splice two different replies (DECISIONS 0014).
 - **Timbre documents no cancel message** on either streaming transport, so an interrupted
   reply is abandoned client-side rather than cancelled upstream. Audio already synthesised
   has already been billed.

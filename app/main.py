@@ -10,6 +10,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI
 
 from app.api.deps import AppResources
@@ -19,26 +20,66 @@ from app.infra.db import create_engine, create_session_factory
 from app.infra.logging import configure_logging
 from app.infra.redis_bus import EventBus, create_redis
 from app.infra.settings import Settings, get_settings
+from app.infra.tts_cache import CachingTTS
 from app.providers.factory import build_llm_provider, build_stt_provider, build_tts_provider
 
 logger = logging.getLogger(__name__)
 
 
 def build_resources(settings: Settings) -> AppResources:
-    """Construct every long-lived object the app needs."""
+    """Construct every long-lived object the app needs.
+
+    The budget guard is built before the providers because it is their usage recorder: an
+    adapter prices what it is about to spend through the guard and never holds a rate.
+    """
     engine = create_engine(settings)
     session_factory = create_session_factory(engine)
     redis = create_redis(settings)
+    budget = BudgetGuard(redis, session_factory, settings)
+    # One client for every outbound HTTP provider, so connections are pooled and reused:
+    # a fresh TLS handshake per TTS request would show up directly as persona latency.
+    http = httpx.AsyncClient()
+
     return AppResources(
         settings=settings,
         engine=engine,
         session_factory=session_factory,
         redis=redis,
+        http=http,
         bus=EventBus(redis),
-        budget=BudgetGuard(redis, session_factory, settings),
-        stt=build_stt_provider(settings.stt_provider),
-        tts=build_tts_provider(settings.tts_provider),
-        llm=build_llm_provider(settings.llm_provider),
+        budget=budget,
+        stt=build_stt_provider(
+            settings.stt_provider,
+            api_key=settings.gnani_api_key,
+            ws_url=settings.gnani_stt_ws_url,
+            model=settings.stt_model,
+            usage=budget,
+        ),
+        tts=CachingTTS(
+            build_tts_provider(
+                settings.tts_provider,
+                client=http,
+                api_key=settings.gnani_api_key,
+                sse_url=settings.gnani_tts_sse_url,
+                model=settings.tts_model,
+                language=settings.tts_language,
+                usage=budget,
+            ),
+            settings.tts_cache_dir,
+            usage=budget,
+        ),
+        llm=build_llm_provider(
+            settings.llm_provider,
+            client=http,
+            base_url=settings.llm_base_url,
+            api_key=settings.llm_api_key,
+            model=settings.llm_model,
+            fallback_model=settings.llm_fallback_model,
+            fallback_reasoning_effort=settings.llm_fallback_reasoning_effort,
+            first_token_timeout=settings.llm_first_token_timeout_s,
+            request_timeout=settings.llm_request_timeout_s,
+            usage=budget,
+        ),
     )
 
 
@@ -61,6 +102,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        await resources.http.aclose()
         await resources.redis.aclose()
         await resources.engine.dispose()
         logger.info("application stopped")

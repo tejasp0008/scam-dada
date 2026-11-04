@@ -1,0 +1,10 @@
+data: {"choices": [{"delta": {"content": "```"}}]}
+
+data: {"choices": [{"delta": {"content": "Arre beta"}}]}
+
+data: {"choices": [{"delta": {"content": "```"}}]}
+
+data: {"choices": [], "usage": {"total_tokens": 40}}
+
+data: [DONE]
+
