@@ -1,0 +1,52 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: dadi
+      POSTGRES_PASSWORD: dadi
+      POSTGRES_DB: scamdadi
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dadi -d scamdadi"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    # Single worker in dev: one orchestrator per call lives in process memory, and a second
+    # worker would serve a dashboard that cannot see the call it is meant to be watching.
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 1 --reload
+    environment:
+      DATABASE_URL: postgresql+asyncpg://dadi:dadi@postgres:5432/scamdadi
+      REDIS_URL: redis://redis:6379/0
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/srv/app
+      - ./migrations:/srv/migrations
+      - ./var:/srv/var
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  pgdata:

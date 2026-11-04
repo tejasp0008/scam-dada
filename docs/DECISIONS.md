@@ -1,0 +1,145 @@
+# Decisions
+
+One entry per choice that is expensive to reverse. Dated, with the reasoning, so the
+architecture can be defended (or revisited) months later.
+
+---
+
+## 0001 — Config travels as WebSocket upgrade headers, and frames are exactly 1024 bytes
+*2026-11-04 · Phase 0 · irreversible-ish: the whole audio path assumes it*
+
+Gnani's Prisma streaming API takes all its configuration as WS upgrade headers and requires
+raw PCM s16le mono in frames of **exactly 1024 bytes** (512 samples), sent at real-time
+cadence. This is not a preference we get to have.
+
+**Decision.** 16 kHz is the pipeline's internal rate end to end. The browser worklet
+captures at the device rate (usually 48 kHz), downsamples to 16 kHz and emits exact
+512-sample frames. `FrameBuffer` carries the remainder between pushes rather than padding
+or dropping it.
+
+**Why 16 kHz rather than 48 kHz.** Prisma resamples 44.1/48 kHz internally, but the
+1024-byte frame rule still applies, so 48 kHz would mean 3× the WebSocket messages for
+audio the model downsamples anyway. 16 kHz is also closer to the telephone audio the model
+was trained on.
+
+**Consequence.** `app/core/audio/framing.py` is pure and heavily tested, because an
+off-by-one in frame slicing shows up as a subtly garbled transcript, hours later, with no
+error anywhere.
+
+---
+
+## 0002 — The STT port yields an event union, not a transcript stream
+*2026-11-04 · Phase 0 · changes every consumer if revisited*
+
+Prisma streaming returns `is_final=true` on **every** transcript — it has no partial
+hypotheses — and signals turn boundaries through separate `speech_start` and `processing`
+events.
+
+**Decision.** `SttSession.events()` yields `SttEvent`, a union of `ready`, `speech_start`,
+`processing`, `transcript` and `error`, rather than the transcript-only iterator the brief
+suggested.
+
+**Why.** A transcript-only stream throws away the only endpointing signal the API gives us.
+Without `processing` there is no cue to start a filler phrase, and without `speech_start`
+there is no confirmation for barge-in. The usual trick of endpointing on stabilising
+partials is simply not available here.
+
+---
+
+## 0003 — The local energy VAD survives even though Prisma ships a VAD
+*2026-11-04 · Phase 0*
+
+Prisma does server-side VAD with configurable thresholds and reports `speech_start`.
+
+**Decision.** Keep a local `EnergyVad` over the inbound frames anyway. It exists **only**
+to cut barge-in; Prisma's events remain the authority on turn boundaries.
+
+**Why.** Barge-in cannot afford a network round trip. By the time the server reports that
+the scammer started talking, the persona has already talked over them for 100-300 ms, which
+is exactly what makes a voice agent feel robotic. Hysteresis (N loud frames to open, M quiet
+to close) is what stops a line click from cancelling the persona mid-word.
+
+---
+
+## 0004 — TTS yields raw PCM, not encoded audio
+*2026-11-04 · Phase 0*
+
+Timbre can return WAV, MP3 or OGG Opus, over REST, SSE or WebSocket, with audio **base64
+encoded inside JSON** on the streaming transports. Neither streaming transport documents a
+cancel or interrupt message.
+
+**Decision.** `TTSProvider.synthesize` yields `AudioChunk` carrying raw PCM s16le. The
+adapter requests `container=raw`, `encoding=pcm_s16le` and decodes the base64 itself. Since
+no cancel exists, barge-in is implemented as: stop browser playback immediately, then
+abandon and close the TTS stream.
+
+**Why.** The browser must be able to discard queued audio the instant the scammer
+interrupts, and that is only cheap with unframed PCM in a ring buffer. Container headers
+mid-stream, or an MP3 decode, both get in the way of dropping audio instantly.
+
+---
+
+## 0005 — One event schema serves the dashboard, the database and the evidence pack
+*2026-11-04 · Phase 0 · the most expensive thing here to change later*
+
+**Decision.** `app/core/events.py` defines eight frozen Pydantic events behind a
+discriminated union. The same JSON is the dashboard WebSocket payload, the `events.payload`
+JSONB column and the evidence pack's input. Events carry a per-call monotonic `seq`.
+
+**Why.** Three schemas for the same facts drift, and the drift shows up as a dashboard that
+disagrees with the PDF. One schema also means a finished call replays into the live UI with
+no second code path, and a dashboard that reconnects can ask for "everything after seq N".
+`extra="forbid"` makes a typo'd field a loud failure instead of a silently missing panel.
+
+**Cost.** Adding a field to an event is a schema change in one place, but renaming one
+breaks persisted history. Accepted: the alternative is worse.
+
+---
+
+## 0006 — Rotating STT sessions, hidden behind the port
+*2026-11-04 · Phase 0 decision, Phase 2 implementation*
+
+Prisma closes a streaming session at **15 minutes** (WS close 1001). The product's entire
+purpose is keeping a scammer on the line for longer than that.
+
+**Decision.** `services/stt_session.py` opens a successor socket at ~13 minutes, waits for a
+silence window, swaps, and drains the old one. The orchestrator sees one continuous
+transcript stream and knows nothing about it. `x-idle-timeout-sec` is set high (900) so a
+scammer pausing to think does not drop the session.
+
+**Why.** Discovering this during a demo rehearsal, as a call that dies at minute 15 for no
+visible reason, is the worst possible time to learn it.
+
+---
+
+## 0007 — The budget guard counts raw units, not credits
+*2026-11-04 · Phase 0*
+
+Gnani's docs publish no credit or rupee conversion anywhere; the limits page says rates live
+in the account console. The programme grants 5,000 credits of unstated denomination.
+
+**Decision.** `api_usage` and the guard track raw units per provider — TTS billable
+characters (tags included: the docs say tag characters are billable), STT audio seconds, LLM
+tokens — against a configurable ceiling per unit type. Cache hits are recorded as zero-unit
+rows rather than skipped.
+
+**Why.** Inventing a cost model would produce exactly the kind of fabricated number the
+brief forbids. Recording cache hits is what turns "caching saves credits" into a measured
+figure.
+
+---
+
+## 0008 — Evon is not reachable, so the LLM is always OpenAI-compatible
+*2026-11-04 · Phase 0*
+
+Gnani's own FAQ says Evon v3.3 is not on the API platform — open weights by request on
+Hugging Face (Apache 2.0, 30B MoE). The Agent Builder's `GET /platform/v1/agents/config/llm_models`
+returns Claude, GPT-4.1-mini, GPT-4o-mini and Gnani's "Pampa" models, no Evon, and it is a
+selector for Agent Builder agents rather than a completions endpoint.
+
+**Decision.** `LLMProvider` with a single OpenAI-compatible adapter (configurable base URL).
+Pointing it at Evon later, self-hosted or otherwise, is one environment variable.
+
+**Why.** Serving a 30B MoE locally is not available to this project in contest week, and the
+brief's instruction not to invent API details rules out writing an Evon client against no
+documentation. The README states this plainly rather than implying Evon is in use.
