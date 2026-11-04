@@ -112,7 +112,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     """Build the ASGI app. Tests pass their own settings instead of mutating the environment."""
     resolved = settings or get_settings()
     app = FastAPI(
-        title="Scam Dadi",
+        title="Scam Dada",
         version="0.1.0",
         description="AI scambaiting for Indian phone scams.",
         lifespan=lifespan,

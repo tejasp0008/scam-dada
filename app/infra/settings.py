@@ -53,6 +53,14 @@ class Settings(BaseSettings):
     tts_model: str = "timbre-v3.0"
     tts_language: str = "hi-en"
 
+    # ---- Personas ----
+    # Voices are chosen by ear from `make audition-male`, not by a published age attribute,
+    # because Gnani does not publish one. Empty until a human has listened; the ageing
+    # preset that goes with the elder voice lives in app/core/personas.py, because it is
+    # part of the character rather than part of the deployment.
+    persona_elder_voice: str = ""
+    persona_grandson_voice: str = ""
+
     # Evon is not on Gnani's API platform, so the LLM is always OpenAI-compatible.
     llm_base_url: str = ""
     llm_api_key: str = ""

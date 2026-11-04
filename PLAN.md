@@ -1,6 +1,12 @@
-# Scam Dadi — Implementation Plan (v1, awaiting approval)
+# Scam Dada — Implementation Plan (v1, approved)
 
 Written 2026-11-04. Source of truth for scope until you amend it.
+
+**Amended 2026-11-05:** the lead persona is Dada, not Dadi, and the relay is Dada →
+grandson. No female Timbre voice reads as elderly and there is no consenting elderly woman to
+clone. Forward-looking sections below are rewritten accordingly; `docs/DECISIONS.md` 0015
+records the change and the reasoning, and earlier entries in that log still say "Dadi"
+because a log that is edited to agree with the present is not a log.
 
 ---
 
@@ -29,10 +35,10 @@ That reorders things sharply:
 
 | Brief item | Proposal | Why |
 |---|---|---|
-| Phase 6 ShorBench + bandit | **Cut the bandit. Keep a text-only scammer sim** as a dev tool | A text-only Dadi-vs-scammer loop costs ~2h, burns zero audio credits, and lets us tune persona prompts without talking to the mic 50 times. The bandit needs hundreds of runs to mean anything and would be a fabricated result by Nov 10. |
+| Phase 6 ShorBench + bandit | **Cut the bandit. Keep a text-only scammer sim** as a dev tool | A text-only Dada-vs-scammer loop costs ~2h, burns zero audio credits, and lets us tune persona prompts without talking to the mic 50 times. The bandit needs hundreds of runs to mean anything and would be a fabricated result by Nov 10. |
 | Highlight reel (ffmpeg waveform video + burned subtitles) | **Cut** | 1–1.5 days of ffmpeg fiddling for an artifact the judges never open. If Nov 9 is calm, a plain audio-only clip cut at LLM-chosen timestamps is a 2h add-on. |
 | Evidence pack PDF | **Keep, last** | Cheap with WeasyPrint, and it is the "intelligence" payoff that makes the project look like a product. Phase 5, Nov 8–9. |
-| Family relay (Dadi → Dada → grandson) | **Keep** | Genuinely the best 10 seconds of the demo video and nearly free once the persona loop exists — it is a prompt + voice swap on shared history. |
+| Family relay (Dada → grandson) | **Keep** | Genuinely the best 10 seconds of the demo video and nearly free once the persona loop exists — it is a prompt + voice swap on shared history. The relay is a list in `app/core/personas.py`, so a second elder is one enum member, one prompt file and one entry. |
 | Canary identities + cross-call match | **Keep** | Cheap, pure-Python, unit-testable, and the single most interview-defensible idea in the brief. |
 | Guardian Mode | **Keep as specified** (state + handoff trigger only) | Already scoped to a trigger. |
 | Human vs robocall check | **Keep** | ~1h: a barge-in probe plus a timing assertion. |
@@ -43,7 +49,7 @@ That reorders things sharply:
 | Day | Work | Gate |
 |---|---|---|
 | **Nov 4 (today, remaining)** | Phase 0 scaffold + Phase 1 provider adapters + smoke script | A real round trip: mic WAV → Prisma transcript → LLM reply → Timbre audio, with units logged |
-| **Nov 5** | Phase 2 persona loop: orchestrator, state machine, energy VAD, barge-in, filler cache, Dadi prompt, browser simulator page | You hold a multi-turn Hinglish conversation with Dadi in the browser and can interrupt her |
+| **Nov 5** | Phase 2 persona loop: orchestrator, state machine, energy VAD, barge-in, filler cache, Dada prompt, browser simulator page | You hold a multi-turn Hinglish conversation with Dada in the browser and can interrupt him |
 | **Nov 6** | Phase 3 intelligence: regex extractors, LLM analysis JSON, stages, pressure, hang-up risk + bait hooks, canaries, family relay, robocall check | All events fire and persist in a simulated call |
 | **Nov 7** | Phase 4 control room + demo hardening | Dashboard updates live, no refresh |
 | **Nov 8** | **Freeze. Record the 60s video.** Phase 5 evidence pack if green | Demo-ready |
@@ -147,7 +153,7 @@ and the plan says so in `DECISIONS.md`.
 The brief's layout, with four changes, each justified.
 
 ```
-scam-dadi/
+scam-dada/
   app/
     api/
       routes/            health.py  calls.py  dashboard.py  artifacts.py
@@ -180,7 +186,7 @@ scam-dadi/
       budget.py    logging.py
     web/
       templates/   static/js/ (mic-worklet.js, play-worklet.js, dashboard.js)  static/css/
-    prompts/       dadi.v1.md  dada.v1.md  grandson.v1.md  analysis.v1.md  fillers.v1.yaml
+    prompts/       ethics.v1.md  dada.v1.md  grandson.v1.md  analysis.v1.md  fillers.v1.yaml
   scripts/         smoke.py  audition_voices.py  pregen_fillers.py  seed.py
   tests/           unit/  integration/  contract/  fixtures/     # <- change 3
   migrations/      one baseline
@@ -323,8 +329,9 @@ restart. One Alembic baseline.
   will be Timbre-synthesised from scripts we write.
 - **No hardcoded results.** Any number in the README or dashboard comes from a logged run,
   stated with its sample size. With six days that means "n=8 calls", not "87% accuracy".
-- **Ethics in the prompts.** Dadi never threatens, insults, claims to be police, calls back,
-  or tries to identify anyone. These go in `dadi.v1.md` as hard constraints, and the
+- **Ethics in the prompts.** No persona ever threatens, insults, claims to be police, calls
+  back, or tries to identify anyone. These live in `ethics.v1.md`, shared verbatim by every
+  persona and pinned by digest in a test, and the
   persona prompts get a test that the constraint block is present and unmodified.
 - Nothing in the brief conflicts with any of this. The one tension is the timeline, which
   §0 addresses.
@@ -338,7 +345,7 @@ restart. One Alembic baseline.
 1. **Gnani API key** — put it in `.env` as `GNANI_API_KEY`. I will never print or log it.
 2. **Which OpenAI-compatible LLM endpoint do you have?** (OpenAI, Groq, OpenRouter,
    Together, a local Ollama…) Dialogue needs fast first tokens; this choice visibly changes
-   how alive Dadi feels. I need base URL + model name + where the key lives.
+   how alive Dada feels. I need base URL + model name + where the key lives.
 3. **Credit reality check** — open app.gnani.ai and tell me the balance and, if shown, what
    the 5,000 programme credits buy per STT second / TTS character. Until then the budget
    guard caps raw units with a conservative default.

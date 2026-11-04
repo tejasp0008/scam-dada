@@ -50,11 +50,15 @@ from app.providers.names import ProviderName
 #: Short, so the real-time cadence of the STT leg does not make the smoke test slow.
 SMOKE_LINE = "Haan beta, <sigh> kaun bol raha hai?"
 SMOKE_RATE = 16000
-SCAMMER_LINE = "Madam main cyber cell se bol raha hoon, aapke naam par parcel pakda gaya hai."
-DADI_SYSTEM = (
-    "You are Dadi, a 72-year-old Indian grandmother on a phone call. Speak Hinglish in "
-    "Latin script. Be confused, warm and slow. Keep the caller talking. One or two short "
-    "sentences. Never threaten, insult, or claim to be police."
+SCAMMER_LINE = "Sir main cyber cell se bol raha hoon, aapke naam par parcel pakda gaya hai."
+# Deliberately a condensed stand-in for app/prompts/dada.v1.md, not the file itself: the
+# smoke test measures the provider leg, and a 4.5 KB system prompt would make the measured
+# time-to-first-token a measurement of prompt length instead.
+DADA_SYSTEM = (
+    "You are Dada, a 74-year-old retired Indian Railways clerk on a phone call. Speak "
+    "Hinglish in Latin script. Be hard of hearing, slow and suspicious. Ask for the "
+    "caller's employee number. One or two short sentences. Never threaten, insult, or "
+    "claim to be police."
 )
 
 
@@ -271,7 +275,7 @@ async def main() -> int:
             usage=budget,
         )
         messages = [
-            ChatMessage(role=Role.SYSTEM, content=DADI_SYSTEM),
+            ChatMessage(role=Role.SYSTEM, content=DADA_SYSTEM),
             ChatMessage(role=Role.USER, content=SCAMMER_LINE),
         ]
         step = Step(f"llm dialogue ({settings.llm_model})")

@@ -20,9 +20,13 @@ class Speaker(StrEnum):
 
 
 class PersonaId(StrEnum):
-    """The family relay, in handoff order."""
+    """Members of the household who can hold the phone.
 
-    DADI = "dadi"
+    Handoff order is not expressed here — see `app.core.personas.RELAY`. Adding another
+    elder is one member, one prompt file and one registry entry; nothing else needs to know
+    how many personas exist.
+    """
+
     DADA = "dada"
     GRANDSON = "grandson"
 

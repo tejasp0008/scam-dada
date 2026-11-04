@@ -1,5 +1,5 @@
 [project]
-name = "scam-dadi"
+name = "scam-dada"
 version = "0.1.0"
 description = "AI scambaiting system for Indian phone scams, built on Gnani Prisma, Timbre and an OpenAI-compatible LLM."
 requires-python = ">=3.11"

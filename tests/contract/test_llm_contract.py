@@ -34,7 +34,7 @@ from app.providers.openai_compatible import (
 pytestmark = pytest.mark.contract
 
 MESSAGES = [
-    ChatMessage(role=Role.SYSTEM, content="You are Dadi."),
+    ChatMessage(role=Role.SYSTEM, content="You are Dada."),
     ChatMessage(role=Role.USER, content="Main cyber cell se bol raha hoon."),
 ]
 

@@ -56,7 +56,7 @@ SAMPLES: tuple[DomainEvent, ...] = (
         turn_seq=1,
         speaker=Speaker.PERSONA,
         text="haan beta <pauses> kaun?",
-        persona=PersonaId.DADI,
+        persona=PersonaId.DADA,
     ),
     StageEvent(
         call_id="c1", seq=3, ts=TS, stage=ScamStage.AUTHORITY, confidence=0.8, pressure_score=0.4
@@ -82,8 +82,8 @@ SAMPLES: tuple[DomainEvent, ...] = (
         call_id="c1",
         seq=6,
         ts=TS,
-        from_persona=PersonaId.DADI,
-        to_persona=PersonaId.DADA,
+        from_persona=PersonaId.DADA,
+        to_persona=PersonaId.GRANDSON,
         reason="risk high",
     ),
     CanaryMatchEvent(

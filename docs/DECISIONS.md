@@ -324,3 +324,122 @@ default settings returns HTTP 200 with no content at all — the whole budget go
 reasoning tokens — and with effort set low it still occasionally emits markdown fences into
 text that is about to be spoken aloud. An empty completion is therefore treated as a
 failure, and backticks are stripped from the stream.
+
+## 0015 — The lead persona is Dada, not Dadi
+*2026-11-05 · Phase 1.5*
+
+The project was built around an elderly woman, "Dadi". None of Timbre's seven female v3.0
+voices read as elderly even aged in post, and cloning a real elderly woman's voice is out of
+reach — there is no consenting speaker to record, and recording one without consent is not
+something this project will do for a contest entry.
+
+**Decision.** The lead persona is **Dada**: Hariprasad, 74, a retired Indian Railways clerk.
+The relay is Dada → grandson. The project is renamed Scam Dada.
+
+**What was deliberately *not* renamed.** The Postgres role and database are still `dadi` and
+`scamdadi`. Renaming them means `docker compose down -v` and a fresh volume, which would
+destroy the `api_usage` rows — the only record of what this project has actually spent, and
+the evidence behind every credit figure in the README. A cosmetic rename is not worth
+turning a measurement back into a guess. The working directory is still `Scam Dadi` for the
+same class of reason: it is one `mv` whenever it is convenient, and it breaks nothing.
+
+Past entries in this log still say "Dadi" where they describe what was decided at the time.
+A decision log that is edited to agree with the present is not a log.
+
+## 0016 — Timbre tag scope is sticky, and unknown tags are billed
+*2026-11-05 · Phase 1.5*
+
+Two facts from docs.gnani.ai/api/TTS/tts-audio-tags that change how prompts are written:
+
+**Tags are not events; they are modes.** "A tag applies from its position to the end of the
+input (or until the next tag). There is no closing tag." One `<slow>` at the front of an
+utterance therefore slows the entire utterance for six billable characters. That is the
+cheapest elderly-voice effect available and it is now how the Dada prompt and the audition
+line are written. The flip side: a single stray `<excited>` poisons everything after it,
+which is an argument for a small vocabulary per persona rather than the full catalogue.
+
+**Unknown tags are stripped silently but still billed.** An LLM that writes `<cough>` for
+`<coughs>` is charged eight characters for nothing. `app/core/tags.py` holds the 13-tag
+catalogue and a per-persona allowed set (6 tags for Dada, 4 for the grandson, laughter
+excluded for both because mockery is ruled out by the ethics block), and strips anything
+else before synthesis.
+
+**An unresolved contradiction in the docs.** The billing section states that
+`Hello! <giggle> Great to hear from you.` "is billed as 42 characters — the full string, tag
+included". That string is 39 characters. Either the example is wrong or Timbre adds ~3
+characters per request, which would make TTS estimates ~8% low on short utterances.
+`billable_characters` is plain `len` and a test pins the discrepancy. Resolving it needs one
+real invoice line, which is on the list of numbers requested from the usage dashboard.
+
+## 0017 — Dada's voice is aged in DSP, and the room is synthetic
+*2026-11-05 · Phase 1.5*
+
+Timbre publishes gender and language per voice but not age, and none of the six male v3.0
+voices sounds older than about 45. Two gaps had to be closed locally.
+
+**Ageing** (`app/core/audio/aging.py`): pitch down by resampling, tempo restored
+independently by a WSOLA time-stretch, 5 Hz amplitude and pitch tremble, then a 300–3400 Hz
+telephone band-pass. The band-pass does most of the perceptual work — it removes the
+studio-clean low end that identifies TTS — which is why `phone-only` exists as a preset: it
+is the control that shows how much of the effect is the ageing and how much is the channel.
+The time-stretch is WSOLA rather than plain overlap-add because splicing a voiced vowel at
+arbitrary phase cancels the fundamental and warbles.
+
+**Room tone** (`app/core/audio/ambience.py`): a ceiling fan (noise chopped at the blade-pass
+rate), 50 Hz mains harmonics, distant traffic and a broadband floor, generated rather than
+sampled. Digital silence between words is the loudest tell that a voice is synthetic.
+
+**Three consequences worth recording:**
+
+1. **The bed is mixed before the band-pass, not after.** A real microphone hears the room and
+   the carrier then filters voice and room together. Mixing after would put 50 Hz hum on a
+   line that cannot carry it. A pleasant side effect: the hum fundamental is removed exactly
+   as a real line removes it, and only its upper harmonics survive.
+2. **The bed is a loop read positionally, not a per-utterance effect.** Room noise that
+   starts and stops with each reply tells the listener precisely when the machine is and is
+   not speaking. `AmbienceBed.take(count, offset)` exists so one offset runs for a whole call.
+3. **Everything is deterministic — no clock-seeded RNG anywhere.** The TTS cache is keyed by
+   content hash; a bed that differed per run would make every cache entry a different room.
+   The ambience presets carry a fixed seed and the tremble uses two incommensurate sinusoids
+   instead of noise.
+
+**Measured cost.** 4–136 ms per clip for 10–13 s of audio, i.e. roughly 1.2% of real time;
+the WSOLA stretch is ~90% of it. Cheap enough to run in the live path, *if* the stretch is
+reworked to be chunk-wise with one frame of lookahead (~43 ms at 24 kHz). Until then ageing
+runs per-utterance and adds its cost before the first byte, which is why the elder's filler
+phrases will be aged once at cache-write time rather than on every playback.
+
+**No credit cost.** All of it is local DSP applied to one synthesis per voice, so the
+24-clip audition grid cost exactly six requests.
+
+## 0018 — Voice cloning is available, but it cannot be combined with audio tags
+*2026-11-05 · Phase 1.5*
+
+Investigated because a consenting elderly male relative may be available to record.
+
+**It works, and it is reachable.** Two steps: `POST /api/v1/tts/voice-clone/embeddings` with
+5–30 s of clean reference audio as `multipart/form-data` returns a `speaker_embedding`
+(`embedding` string, `shape [1, 768]`, `dtype torch.bfloat16`); that object is then passed to
+the ordinary `/api/v1/tts/inference`, `/tts/sse` or `/tts` WebSocket endpoints. There is no
+server-side voice ID — the caller caches the embedding.
+
+**But it is a different model.** The cloned-voice request uses `vachana-vc-v1`, which "is
+automatically set when `speaker_embedding` is provided". Audio tags are documented as
+"supported on `timbre-v3.0` **only**". So cloning costs the entire expressive layer:
+`<slow>`, `<coughs>`, `<sigh>` and `<pauses>` — the four tags Dada's prompt is built on, and
+the ones doing the most work in the audition clips.
+
+**Two further unknowns.** The cloned-voice request body has no `language` field at all,
+unlike Timbre's, so Hinglish handling for a cloned voice is undocumented. And the docs state
+no consent requirement, which means the obligation is entirely ours rather than enforced.
+
+**Decision.** Do not clone for the demo. The ageing chain already produces an elderly voice
+from a tagged Timbre voice, and trading a certain loss (tags) for an uncertain gain
+(timbre fidelity, unknown Hinglish) is the wrong way round this close to a deadline. The
+experiment is cheap to run later — one embedding call plus one synthesis, and the ageing
+chain applies to a cloned voice unchanged — so it is a post-submission question.
+
+**If it is ever run:** a voice embedding of an identifiable living person is personal
+biometric data. It never goes in the repo, it goes in a gitignored file referenced from
+`.env`, written consent is recorded alongside it, and the fact that a cloned elderly voice
+has obvious misuse potential is reason enough to keep it out of a public artifact.

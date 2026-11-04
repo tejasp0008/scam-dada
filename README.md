@@ -1,14 +1,16 @@
-# Scam Dadi
+# Scam Dada
 
 An AI scambaiting system for Indian phone scams. When a scam call is flagged, an elderly
-persona ("Dadi") takes the call, keeps the scammer engaged in Hinglish for as long as
-possible, and extracts intelligence — UPI handles, fake officer names, scam scripts — into
-an evidence pack.
+persona — **Dada**, a 74-year-old retired Railways clerk — takes the call, keeps the scammer
+engaged in Hinglish for as long as possible, and hands him to the grandson when he starts to
+lose patience. Everything the scammer says is extracted into an evidence pack: UPI handles,
+fake officer names, the shape of the script.
 
 Built for the Great Indian AI Internship Challenge on Gnani's speech models.
 
-> **Status: Phase 1 complete.** The three provider adapters work against the live APIs.
-> Nothing in this README is a claimed capability unless it is listed as done below.
+> **Status: Phase 1 complete, personas drafted.** The three provider adapters work against
+> the live APIs. Nothing in this README is a claimed capability unless it is listed as done
+> below.
 
 ## What works today
 
@@ -23,7 +25,11 @@ Built for the Great Indian AI Internship Challenge on Gnani's speech models.
 | **LLM** | OpenAI-compatible adapter, streaming + validated JSON, automatic fallback to a second model |
 | **TTS cache** | Content-hash cache; hits cost nothing and record what they avoided |
 | **Budget guard** | Credits (₹) per pool with a hard stop, raw units kept for auditability |
-| Tests | 156 offline + 64 contract, `ruff` and `mypy` clean (`mypy --strict` on `core` and `providers`) |
+| **Voice ageing** | Pitch, WSOLA tempo, tremble and a 300–3400 Hz telephone band — Timbre has no elderly voice, so Dada's is made in DSP |
+| **Room tone** | Synthetic ceiling fan, mains hum, street and room floor, mixed under the voice before the band-pass |
+| **Audio tags** | The 13-tag Timbre v3.0 catalogue, with a per-persona allowed set; unknown tags are billed and then discarded by the API, so they are stripped first |
+| **Personas** | Dada and grandson prompts, ethics block shared and digest-pinned, relay registry |
+| Tests | 269 offline + 64 contract, `ruff` and `mypy` clean (`mypy --strict` on `core` and `providers`) |
 
 Measured on the live APIs by `make smoke` (n=1 per provider, 2026-11-04):
 
@@ -36,8 +42,8 @@ Measured on the live APIs by `make smoke` (n=1 per provider, 2026-11-04):
 | LLM validated JSON (`openai/gpt-oss-120b`) | 762–1769 ms |
 | Fallback recovery after a 404 | 595–813 ms |
 
-Not built yet: the orchestrator, personas, the intelligence layer, the dashboard and the
-evidence pack. See [PLAN.md](PLAN.md) for the phase plan and
+Not built yet: the orchestrator, the intelligence layer, the dashboard and the evidence
+pack. The persona prompts exist but nothing drives them yet. See [PLAN.md](PLAN.md) for the phase plan and
 [docs/DECISIONS.md](docs/DECISIONS.md) for why the architecture looks like this.
 
 ## Which Gnani models are used, and where
@@ -45,7 +51,8 @@ evidence pack. See [PLAN.md](PLAN.md) for the phase plan and
 | Model | Role | Where |
 |---|---|---|
 | **Prisma v3.0** | Streaming speech-to-text | [`app/providers/gnani_prisma.py`](app/providers/gnani_prisma.py). `language_code=indic-auto` so a scammer switching language mid-call still transcribes, and `format=transliterate` because it was the only format that returned Latin-script Hinglish intact — see DECISIONS 0009. |
-| **Timbre v3.0** | Expressive text-to-speech | [`app/providers/gnani_timbre.py`](app/providers/gnani_timbre.py). v3.0 specifically, because inline audio tags (`<sigh>`, `<pauses>`, `<whispers>`) only work on v3.0 — v2.5 strips them silently. `language=hi-en` for Hinglish, over SSE, as headerless raw PCM. |
+| **Timbre v3.0** | Expressive text-to-speech | [`app/providers/gnani_timbre.py`](app/providers/gnani_timbre.py). v3.0 specifically, because inline audio tags only work on v3.0 — v2.5 strips them silently. A tag applies from where it sits to the end of the input, so one `<slow>` costs six characters and slows a whole utterance. `language=hi-en` for Hinglish, over SSE, as headerless raw PCM. |
+| **Voice cloning** (`vachana-vc-v1`) | Not used | Reachable and documented, but it is a **different model** from `timbre-v3.0`, and audio tags are v3.0-only. Cloning would cost `<slow>`, `<coughs>`, `<sigh>` and `<pauses>` — the four tags Dada's prompt is built on. Its request body also has no `language` field, so Hinglish behaviour is undocumented. Traded away deliberately; see DECISIONS 0018. |
 | **Evon v3.3** | Dialogue and analysis LLM | **Not used — it is not reachable.** Gnani's FAQ says Evon is not on the API platform (open weights by request on Hugging Face). The Agent Builder's model list returns Claude, GPT-4.1-mini, GPT-4o-mini and Gnani's "Pampa" models, no Evon, and it is a selector for agents rather than a completions endpoint. The LLM therefore sits behind `LLMProvider` with an OpenAI-compatible adapter; pointing it at Evon is one environment variable. |
 
 ## Architecture
@@ -79,7 +86,8 @@ flowchart TB
         SM["state machine"]
         EV["event schema"]
         AUD["audio: framing, resample, VAD"]
-        INTEL["personas, tactics, risk,<br/>extract, stages, canary"]
+        INTEL["personas, tags, tactics, risk,<br/>extract, stages, canary"]
+        AGE["ageing + room tone<br/>pitch, tempo, tremble, band"]
     end
 
     subgraph providers["providers — ports + adapters"]
@@ -98,6 +106,7 @@ flowchart TB
     MIC -->|PCM| CWS --> ORCH
     ORCH --> STTS --> PSTT
     ORCH --> TURN --> PTTS
+    TURN --> AGE
     ORCH --> PLLM
     ORCH --> ANA --> PLLM
     ORCH --> SM & EV & AUD
@@ -119,7 +128,7 @@ cp .env.example .env     # then fill in GNANI_API_KEY and the LLM_* values
 make install             # venv on 3.11 + dev dependencies
 make up                  # postgres + redis
 make migrate             # apply the baseline schema
-make test                # 117 tests, offline, zero API cost
+make test                # 269 tests, offline, zero API cost
 make dev                 # api on http://localhost:8000
 ```
 
@@ -141,7 +150,8 @@ surprise on stage.
 | `make test` | Unit + integration, offline, no credits spent |
 | `make test-contract` | Adapters against recorded sample payloads, still offline |
 | `make smoke` | **Spends credits.** One real call per provider end to end; prints latency and cost |
-| `make audition` | **Spends credits.** One line in every Timbre v3.0 voice, so you can pick a persona's voice by ear |
+| `make audition` | **Spends credits.** One line in every Timbre v3.0 voice. `ARGS="--male"` for the male set |
+| `make audition-male` | **Spends credits** (6 requests). Dada's audition: six male voices × four ageing presets × room tone, 33 clips from 6 API calls |
 | `make lint` / `make fmt` / `make types` | `ruff` and `mypy` |
 | `make check` | Everything that gates a phase |
 | `make revision m="..."` | Autogenerate a migration |
@@ -154,10 +164,13 @@ the system generates is visibly fake: reserved number ranges, fictional names, U
 on `@demo`. The mock scammer script is asserted to be fictional by a test, and the canary
 generator will be too.
 
-**Ethics guardrails in the persona prompts.** Dadi never threatens, never insults, never
-claims to be police, never calls anyone back, and never tries to identify or locate a real
-person. These are hard constraints in the prompt files, with a test that the constraint block
-is present and unmodified.
+**Ethics guardrails in the persona prompts.** Neither persona ever threatens, insults,
+claims to be police, offers to call anyone back, or tries to identify or locate a real
+person. The constraints live in one file, [`app/prompts/ethics.v1.md`](app/prompts/ethics.v1.md),
+shared verbatim by every persona, and its sha256 is pinned by a test — so changing it fails
+the suite until someone updates the digest on purpose. Six named constraints are asserted
+individually, and no persona may use the `<laugh>`, `<giggle>`, `<shouting>` or `<excited>`
+audio tags, because a laugh in the middle of a scam call is mockery and mockery is ruled out.
 
 **No hardcoded results.** Every number in this README and in the dashboard comes from a
 logged run and is reported with its sample size. The "117 tests passing" above is the output
@@ -196,6 +209,18 @@ real limit.
 - **Timbre documents no cancel message** on either streaming transport, so an interrupted
   reply is abandoned client-side rather than cancelled upstream. Audio already synthesised
   has already been billed.
+- **Voice ageing runs per utterance, not per chunk.** Measured at 4–136 ms for a 10–13 s
+  clip (~1.2% of real time), but the WSOLA time-stretch needs lookahead, so today the whole
+  utterance is processed before the first byte goes out. Fillers will be aged once at
+  cache-write time; a chunk-wise stretch with one frame of lookahead is the fix if the
+  per-utterance cost shows up in the live path.
+- **Timbre's output is not byte-identical between runs.** The same text and voice came back
+  10.3 s long on one run and 10.2 s on another, so the TTS cache is the only way to get a
+  reproducible demo, not merely a cheaper one.
+- **The documented TTS character count does not match its own example.** Gnani's billing
+  example says a 39-character string bills as 42. `billable_characters` is plain `len` until
+  one real invoice line settles it; if the docs are right, TTS estimates are ~8% low on short
+  utterances (DECISIONS 0016).
 - **Resampling is linear interpolation**, not a polyphase filter. Adequate for 48k→16k speech
   into an ASR trained on telephone audio; revisit if transcript quality is the bottleneck.
 - **Browser only.** There is no telephony leg. Input is a live microphone or a replayed

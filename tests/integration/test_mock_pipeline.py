@@ -77,7 +77,7 @@ async def test_one_turn_from_browser_audio_to_synthesised_reply() -> None:
         token
         async for token in llm.stream_chat(
             [
-                ChatMessage(role=Role.SYSTEM, content="You are Dadi."),
+                ChatMessage(role=Role.SYSTEM, content="You are Dada."),
                 ChatMessage(role=Role.USER, content=transcript.text),
             ]
         )
