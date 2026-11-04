@@ -23,7 +23,10 @@ import httpx
 
 from app.core.audio.framing import pcm_to_wav
 from app.core.cost import BillingPool
+from app.infra.budget import BudgetGuard
+from app.infra.db import create_engine, create_session_factory
 from app.infra.logging import configure_logging
+from app.infra.redis_bus import create_redis
 from app.infra.settings import get_settings
 from app.providers.base import TtsRequest
 from app.providers.gnani_timbre import GnaniTimbreTTS
@@ -68,6 +71,13 @@ async def main() -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     results: list[tuple[str, float, float, Path | None, str]] = []
 
+    # The guard is wired in even for a one-off script: an audition is real spend, and
+    # unrecorded spend makes the end-of-project credit numbers a guess.
+    engine = create_engine(settings)
+    sessions = create_session_factory(engine)
+    redis = create_redis(settings)
+    budget = BudgetGuard(redis, sessions, settings)
+
     async with httpx.AsyncClient() as client:
         tts = GnaniTimbreTTS(
             api_key=settings.gnani_api_key,
@@ -75,6 +85,7 @@ async def main() -> int:
             model=settings.tts_model,
             language=settings.tts_language,
             client=client,
+            usage=budget,
             read_timeout=60.0,
         )
         for voice in voices:
@@ -107,6 +118,10 @@ async def main() -> int:
             )
             results.append((voice, first_byte_ms, seconds, path, "ok"))
 
+    status = await budget.status(BillingPool.GNANI)
+    await redis.aclose()
+    await engine.dispose()
+
     ok = [r for r in results if r[4] == "ok"]
     print(f"\n{len(ok)}/{len(voices)} voices synthesised into {args.out}/")
     if ok:
@@ -114,8 +129,9 @@ async def main() -> int:
         print(f"Fastest to first audio: {fastest[0]} at {fastest[1]:.0f} ms")
         print(f"\nListen to all of them:\n  open {args.out}/")
     print(
-        f"\nSpend recorded against the {BillingPool.GNANI.value} pool; "
-        f"run with BUDGET_ENABLED=true to have the guard enforce the ceiling."
+        f"\nGnani pool now at {status.spent:.4f} credits of a "
+        f"{status.stop_at:g} hard stop"
+        f"{' (estimated rates)' if status.estimated else ''}"
     )
     return 0 if len(ok) == len(voices) else 1
 
