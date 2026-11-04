@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     # Prisma v3.0 is required for indic-auto and keyterms.
     stt_model: str = "prisma-v3.0"
     stt_language_code: str = "indic-auto"
+    # transliterate is the only format that returned Latin-script Hinglish intact.
+    stt_format: str = "transliterate"
     stt_sample_rate: int = 16000
 
     # Timbre v3.0 is required for inline audio tags; v2.5 strips them silently.

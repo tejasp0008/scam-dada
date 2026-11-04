@@ -143,3 +143,90 @@ Pointing it at Evon later, self-hosted or otherwise, is one environment variable
 **Why.** Serving a 30B MoE locally is not available to this project in contest week, and the
 brief's instruction not to invent API details rules out writing an Evon client against no
 documentation. The README states this plainly rather than implying Evon is in use.
+
+---
+
+## 0009 — Prisma runs in `transliterate`, so the pipeline speaks Latin Hinglish
+*2026-11-04 · measured, not assumed*
+
+Prisma v3.0 offers four output formats. All four were run against the same 2.7 s clip, in
+which Timbre said *"Haan beta, &lt;sigh&gt; kaun bol raha hai?"*:
+
+| `format` | transcript | notes |
+|---|---|---|
+| `verbatim` | `बहन बेटा, कौन बोल रहा है?` | Devanagari; "Haan" misheard as "बहन" (bahan) |
+| `transcribe` | `कौन बोल रहा है?` | Devanagari; **dropped the opening two words** |
+| `codemix` | `बहन बेटा, कौन बोल रहा है?` | identical to verbatim on this clip |
+| `transliterate` | `Haan beta, kaun bol raha hai?` | **exact, in Latin script** |
+
+**Decision.** `STT_FORMAT=transliterate`, exposed as `Settings.stt_format`.
+
+**Why.** Three reasons, in order of weight. The LLM persona prompt is written in Latin
+Hinglish, so a Devanagari transcript forces a script mismatch between what the scammer said
+and how Dadi is told to speak. The dashboard transcript is read by judges who may not read
+Devanagari. And `transcribe`, the format used in the docs' own quick-start example, silently
+dropped the first two words of a four-word phrase, which in this product is the difference
+between hearing the scammer's opening claim and missing it.
+
+**Caveat.** `transliterate` returns no `detected_language_code` (the docs say so, and the run
+confirmed `None`). Language detection therefore has to come from a second signal if we ever
+need it; nothing currently does.
+
+---
+
+## 0010 — Dialogue and analysis run on different models, chosen by measured TTFT
+*2026-11-04 · measured, not assumed*
+
+The Groq account has no Llama models. Available chat models were benchmarked on a real Dadi
+system prompt plus a scammer line, streaming, measuring time to first token:
+
+| model | TTFT | reply quality |
+|---|---|---|
+| `qwen/qwen3.8-27b` | **181 ms** | in character, fluent Hinglish |
+| `allam-2-7b` | 164 ms | fastest, but confused the roles — it is an Arabic/English model |
+| `openai/gpt-oss-120b` (`reasoning_effort: low`) | 422 ms | good reply, emitted a stray markdown fence |
+| `openai/gpt-oss-20b` (`reasoning_effort: low`) | 584 ms | in character |
+| `openai/gpt-oss-20b` (default) | — | **returned empty content**: the whole budget went to reasoning tokens |
+
+**Decision.** `LLM_MODEL=qwen/qwen3.8-27b` for dialogue, `LLM_ANALYSIS_MODEL=openai/gpt-oss-120b`
+for analysis.
+
+**Why.** Dialogue is latency-critical — every millisecond before the first token is silence
+the scammer hears — and Qwen was 2.3× faster to first token than the next usable option while
+also producing the best Hinglish. Analysis is a background JSON extraction that must not
+block a reply, so a slower reasoning model is the right trade there.
+
+**Consequence for the adapter.** The gpt-oss default returning empty content is a trap: the
+OpenAI-compatible adapter must pass arbitrary extra parameters (`reasoning_effort`) from
+config, and `complete_json` must treat an empty completion as a failure to retry rather than
+as valid output.
+
+---
+
+## 0011 — Timbre's WAV header cannot be trusted; we use raw PCM and write our own
+*2026-11-04 · measured, not assumed*
+
+A Timbre REST response with `container=wav` was inspected byte by byte:
+
+```
+file size on disk   : 128792 bytes
+RIFF chunk declares : 4294967303 bytes
+data chunk declares : 4294967295 bytes   (0xFFFFFFFF)
+data bytes actually : 128748 bytes
+duration per header : 89478.49 s         <- what any WAV reader believes
+duration from bytes : 2.68 s             <- the truth
+```
+
+Timbre ships a streaming placeholder size (`0xFFFFFFFF`) in a non-streaming response. Python's
+`wave` module reports the clip as 24.8 hours long. Prisma transcribed it correctly regardless,
+so the bytes are fine — only the header lies.
+
+**Decision.** Request `container=raw` with `encoding=pcm_s16le` everywhere, which decision 0004
+already required for barge-in. Wherever a real WAV file is needed — the demo replay fixture,
+the ffmpeg highlight cut, anything an operator opens — we write the header ourselves from the
+byte count.
+
+**Why it matters beyond tidiness.** Duration is load-bearing in three places: the
+"scammer minutes wasted" counter, the STT seconds the budget guard charges, and any ffmpeg
+operation in Phase 5. All three would have been wrong by four orders of magnitude, and the
+counter is a number shown to judges.
