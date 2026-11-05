@@ -28,14 +28,20 @@ from datetime import datetime
 from app.core.audio.call_profile import PROFILES_BY_NAME, CallProfile
 from app.core.audio.framing import FrameBuffer
 from app.core.audio.vad import EnergyVad, Vad
+from app.core.canary import CanaryMatch
 from app.core.events import (
+    CanaryMatchEvent,
+    EntityEvent,
     LatencyEvent,
     PersonaHandoffEvent,
+    RiskEvent,
+    StageEvent,
     StateChangeEvent,
     TranscriptEvent,
 )
-from app.core.models import PersonaId, Speaker, Turn
+from app.core.models import Entity, PersonaId, Speaker, Turn
 from app.core.personas import LEAD_PERSONA, PersonaProfile, next_in_relay, profile_for
+from app.core.risk import BaitHook, choose_hook
 from app.core.state import CallState, transition
 from app.core.tags import sanitize_tags, tidy_for_speech
 from app.core.turn import (
@@ -61,6 +67,8 @@ from app.providers.base import (
     TTSProvider,
     TtsRequest,
 )
+from app.services.analysis import CallAnalyst, TurnAnalysis
+from app.services.canary_registry import CanaryRegistry
 from app.services.prompts import persona_fillers, persona_system_prompt
 from app.services.recorder import CallRecorder
 from app.services.speaker import PersonaSpeaker
@@ -76,6 +84,11 @@ AudioSink = Callable[[bytes], Awaitable[None]]
 #: does not mean the persona has finished its sentence, and cutting it off mid-word is worse
 #: than a slightly later close.
 DRAIN_TIMEOUT_SECONDS = 30.0
+
+#: How long teardown waits for analysis tasks. Shorter than the dialogue drain: an analysis
+#: that has not finished by now is detail the evidence pack can do without, whereas a reply
+#: cut off mid-word is something the scammer hears.
+ANALYSIS_DRAIN_SECONDS = 10.0
 
 #: Called when playback must stop immediately, so the transport can drop whatever it has
 #: queued. Without this a browser with 2 seconds buffered keeps talking over the scammer
@@ -107,6 +120,16 @@ class CallConfig:
     turn_budget: TurnBudget = field(default_factory=TurnBudget)
     max_reply_sentences: int = 3
     source: str = "browser"
+    analysis_enabled: bool = True
+    analysis_model: str | None = None
+    #: Analyse every Nth caller turn rather than all of them.
+    #:
+    #: Not a cost saving so much as a capacity one. Analysis and dialogue share one account
+    #: token budget - on the free tier, 8000 tokens a minute - and a turn costs roughly 1600
+    #: input tokens of dialogue plus 1200 of analysis. Running both on every turn throttled
+    #: the *dialogue* model, which the caller hears. Stage and risk move slowly enough that
+    #: every second turn loses nothing a human would notice.
+    analysis_every_n_turns: int = 2
 
 
 @dataclass(slots=True)
@@ -142,6 +165,7 @@ class CallOrchestrator:
         flush: FlushSink | None = None,
         vad: Vad | None = None,
         clock: Callable[[], float] | None = None,
+        canary: CanaryRegistry | None = None,
     ) -> None:
         self._config = config
         self._stt = stt
@@ -163,6 +187,14 @@ class CallOrchestrator:
         self._session: RotatingSttSession | None = None
         self._was_speaking = False
         self._rotations: dict[PersonaId, FillerRotation] = {}
+        self._analyst = CallAnalyst(llm, model=config.analysis_model)
+        self._canary = canary or CanaryRegistry(config.call_id)
+        self._analyses: set[asyncio.Task[None]] = set()
+        self._latest: TurnAnalysis | None = None
+        self._used_hooks: list[str] = []
+        self._pending_hook: BaitHook | None = None
+        self._reported_entities: set[tuple[str, str]] = set()
+        self._caller_turns_seen = 0
         self.ended_reason: str | None = None
         self.persona_sequence: list[PersonaId] = [LEAD_PERSONA.persona_id]
 
@@ -212,6 +244,7 @@ class CallOrchestrator:
 
     async def run(self, inbound: AsyncIterator[bytes]) -> None:
         """Answer, converse until the caller stops sending audio, then end."""
+        await self._canary.start()
         session = await RotatingSttSession.open(self._stt, self._config.stt_config)
         self._session = session
 
@@ -230,6 +263,7 @@ class CallOrchestrator:
             # instead would discard the caller's last utterance and the reply to it.
             await session.aclose()
             await self._drain_events(events)
+            await self._drain_analyses()
             await self._speaker.stop()
             if self._state is not CallState.ENDED:
                 await self._set_state(CallState.ENDED, self.ended_reason)
@@ -310,6 +344,8 @@ class CallOrchestrator:
         await self._emit_transcript(caller_turn)
         self._recorder.record_turn(caller_turn)
 
+        await self._check_canary(caller_turn)
+        self._start_analysis(caller_turn.seq)
         await self._maybe_hand_over()
         await self._reply(latency)
 
@@ -382,7 +418,26 @@ class CallOrchestrator:
 
         if (note := self._handoff_note(window)) is not None:
             messages.append(ChatMessage(role=Role.SYSTEM, content=note))
+        if (hook := self._take_hook()) is not None:
+            messages.append(
+                ChatMessage(
+                    role=Role.SYSTEM,
+                    content=(
+                        "The caller is close to ending the call. Work the following into "
+                        f"this reply, in character and without hurrying: {hook.instruction}"
+                    ),
+                )
+            )
         return messages
+
+    def _take_hook(self) -> BaitHook | None:
+        """Consume the armed hook, if there is one. Each hook is used at most once."""
+        hook = self._pending_hook
+        if hook is None:
+            return None
+        self._pending_hook = None
+        self._used_hooks.append(hook.name)
+        return hook
 
     def _handoff_note(self, window: Sequence[Turn]) -> str | None:
         """Tell the current persona which of the replies above were somebody else's."""
@@ -486,14 +541,18 @@ class CallOrchestrator:
 
     async def _speak(self, text: str, latency: TurnLatency, spoken: list[str]) -> None:
         """Synthesise and play one sentence."""
+        request = self._tts_request(text)
         try:
-            first_byte = await self._speaker.speak(self._tts_request(text), profile=self.profile())
+            first_byte = await self._speaker.speak(request, profile=self.profile())
         except ProviderError as exc:
             logger.warning("synthesis failed", extra={"error": str(exc), "text": text[:40]})
             return
         if latency.tts_first_byte_ms is None and first_byte is not None:
             latency.tts_first_byte_ms = int(first_byte * 1000)
-        spoken.append(text)
+        # What was actually sent to the synthesiser, not the model's raw text: the recorded
+        # transcript and the evidence pack should say what the persona said, and the raw text
+        # still carries the line breaks and the stripped tags that never reached the caller.
+        spoken.append(request.text)
 
     async def _record_persona_turn(self, text: str, latency: TurnLatency) -> None:
         turn = Turn(
@@ -506,6 +565,174 @@ class CallOrchestrator:
         self._turns.append(turn)
         await self._emit_transcript(turn)
         self._recorder.record_turn(turn, latency=latency.as_dict())
+
+    # ---- analysis ---------------------------------------------------------------------
+
+    def _start_analysis(self, turn_seq: int) -> None:
+        """Run the analysis pass as its own task.
+
+        Not awaited, and that is the whole design: the persona's reply must not wait for a
+        second model call, must not change because of its result, and must not fail when it
+        fails. A model that is slow, rate-limited or down costs the dashboard detail and
+        nothing else.
+        """
+        if not self._config.analysis_enabled:
+            return
+        self._caller_turns_seen += 1
+        every = max(1, self._config.analysis_every_n_turns)
+        # Always analyse the first turn, so the dashboard is populated immediately rather
+        # than staying blank through the opening exchange.
+        if self._caller_turns_seen > 1 and self._caller_turns_seen % every != 1:
+            return
+        self._track(asyncio.create_task(self._analyse(turn_seq)))
+
+    async def _analyse(self, turn_seq: int) -> None:
+        """Analyse the call so far and emit what it found."""
+        try:
+            analysis = await self._analyst.analyse(tuple(self._turns), turn_seq=turn_seq)
+        except Exception:
+            # `analyse` is documented not to raise, so reaching here is a bug rather than a
+            # provider failure - logged loudly, and still never allowed near the call.
+            logger.exception("analysis failed", extra={"call_id": self._config.call_id})
+            return
+
+        self._latest = analysis
+        await self._emit_stage(analysis)
+        await self._emit_entities(analysis)
+        await self._emit_risk(analysis)
+        self._arm_hook(analysis)
+
+    async def _emit_stage(self, analysis: TurnAnalysis) -> None:
+        def build(call_id: str, seq: int, ts: datetime) -> StageEvent:
+            return StageEvent(
+                call_id=call_id,
+                seq=seq,
+                ts=ts,
+                stage=analysis.stage,
+                confidence=analysis.stage_confidence,
+                pressure_score=analysis.pressure_score,
+            )
+
+        await self._recorder.emit(build)
+
+    async def _emit_entities(self, analysis: TurnAnalysis) -> None:
+        """Emit entities not already reported, so the dashboard list only grows."""
+        for entity in analysis.entities:
+            key = (entity.entity_type.value, entity.value.casefold())
+            if key in self._reported_entities:
+                continue
+            self._reported_entities.add(key)
+            await self._emit_entity(entity)
+            self._recorder.record_entity(entity)
+
+    async def _emit_entity(self, entity: Entity) -> None:
+        def build(call_id: str, seq: int, ts: datetime) -> EntityEvent:
+            return EntityEvent(
+                call_id=call_id,
+                seq=seq,
+                ts=ts,
+                entity_type=entity.entity_type,
+                value=entity.value,
+                source=entity.source,
+                turn_seq=entity.turn_seq,
+                confidence=entity.confidence,
+            )
+
+        await self._recorder.emit(build)
+
+    async def _emit_risk(self, analysis: TurnAnalysis) -> None:
+        tactic = self._pending_hook.name if self._pending_hook else None
+
+        def build(call_id: str, seq: int, ts: datetime) -> RiskEvent:
+            return RiskEvent(
+                call_id=call_id,
+                seq=seq,
+                ts=ts,
+                hangup_risk=analysis.hangup_risk,
+                signals=analysis.risk_signals,
+                tactic=tactic,
+            )
+
+        await self._recorder.emit(build)
+
+    def _arm_hook(self, analysis: TurnAnalysis) -> None:
+        """Pick a bait hook when the caller is close to leaving.
+
+        Armed here and consumed by the next reply rather than applied retroactively: the
+        turn whose risk score triggered the hook has already been spoken.
+        """
+        if not analysis.needs_hook or self._pending_hook is not None:
+            return
+        hook = choose_hook(analysis.stage, self._used_hooks)
+        if hook is None:
+            logger.info("hang-up risk is high but every hook is spent")
+            return
+        self._pending_hook = hook
+        logger.info(
+            "arming a bait hook",
+            extra={
+                "call_id": self._config.call_id,
+                "hook": hook.name,
+                "hangup_risk": analysis.hangup_risk,
+                "signals": list(analysis.risk_signals),
+            },
+        )
+
+    async def _check_canary(self, turn: Turn) -> None:
+        """Look for a canary issued to an earlier call in what the caller just said.
+
+        A match means two calls are working from the same lead list, which is the strongest
+        claim this system makes, so it is logged at warning level and persisted even though
+        the dashboard already has the event.
+        """
+        matches = self._canary.check(turn.text)
+        if not matches:
+            return
+
+        for match in matches:
+
+            def build(
+                call_id: str, seq: int, ts: datetime, found: CanaryMatch = match
+            ) -> CanaryMatchEvent:
+                return CanaryMatchEvent(
+                    call_id=call_id,
+                    seq=seq,
+                    ts=ts,
+                    identity_id=found.identity_id,
+                    issued_call_id=found.issued_call_id,
+                    matched_field=found.matched_field,
+                    matched_text=found.matched_text,
+                    score=found.score,
+                )
+
+            await self._recorder.emit(build)
+
+        logger.warning(
+            "canary identity from an earlier call appeared in this one",
+            extra={
+                "call_id": self._config.call_id,
+                "matched_fields": [m.matched_field for m in matches],
+                "issued_call_ids": [m.issued_call_id for m in matches],
+            },
+        )
+        self._track(asyncio.create_task(self._canary.record(matches)))
+
+    def _track(self, task: asyncio.Task[None]) -> None:
+        """Keep a reference to a background task; asyncio holds only a weak one."""
+        self._analyses.add(task)
+        task.add_done_callback(self._analyses.discard)
+
+    async def _drain_analyses(self) -> None:
+        """Let outstanding analysis tasks finish so their events reach the evidence pack."""
+        if not self._analyses:
+            return
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*tuple(self._analyses), return_exceptions=True),
+                timeout=ANALYSIS_DRAIN_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning("timed out draining analysis", extra={"call_id": self._config.call_id})
 
     async def _emit_latency(self, latency: TurnLatency) -> None:
         turn_seq = max(0, self._turn_seq - 1)

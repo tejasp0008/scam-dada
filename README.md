@@ -8,9 +8,10 @@ fake officer names, the shape of the script.
 
 Built for the Great Indian AI Internship Challenge on Gnani's speech models.
 
-> **Status: Phase 2 complete.** A scripted five-turn call runs end to end on the live
-> APIs — transcript, persona replies, barge-in and the family relay. Nothing in this README
-> is a claimed capability unless it is listed as done below.
+> **Status: Phase 3 complete.** A scripted call runs end to end on the live APIs —
+> transcript, persona replies, barge-in, the family relay, live scam-stage and risk scoring,
+> entity extraction, and cross-call canary leak detection. Nothing in this README is a
+> claimed capability unless it is listed as done below.
 
 ## What works today
 
@@ -39,7 +40,13 @@ Built for the Great Indian AI Internship Challenge on Gnani's speech models.
 | **Call transport** | `/ws/call`: PCM in, persona audio out, JSON control on the same socket, with an explicit flush so barge-in is instant |
 | **Browser simulator** | A page at `/` with two AudioWorklets — capture resamples to 16 kHz and frames to 1024 bytes, playback is a ring buffer so a barge-in can drop queued audio |
 | **Scripted call driver** | `scripts/fake_call.py` runs a whole call with no microphone, so a demo take is reproducible |
-| Tests | 507 offline + 64 contract, `ruff` and `mypy` clean (`mypy --strict` on `core` and `providers`) |
+| **Entity extraction** | Regex-only and reproducible: UPI handles, Indian mobiles, IFSC, case numbers, claimed organisations and ranks, and Hinglish amounts (`do lakh`, `paanch hazaar`, `2.5 lakh`) |
+| **Scam stages** | Five stages scored from keyword evidence, monotonic so the badge never retreats, with a pressure gauge whose signals are shown beside it |
+| **Hang-up risk** | Named signals only, including two a phrase list cannot see — replies shortening, and recency — feeding a bait-hook selector |
+| **Bait hooks** | Seven retention tactics, chosen by stage and used once each. Instructions rather than scripts, and none pleads or promises a payment |
+| **Canary identities** | One provably-unusable fictional identity per call, matched against every earlier one — including when the caller reads it aloud digit by digit |
+| **LLM analysis** | A validated-JSON second opinion that adds what regex cannot see, never blocks the dialogue path, and degrades to the keyword pass when the model is down |
+| Tests | 1040 offline + 64 contract, `ruff` and `mypy` clean (`mypy --strict` on `core` and `providers`) |
 
 Measured on two consecutive live calls through the orchestrator (2026-11-06), per turn,
 from the caller stopping speaking:
@@ -62,8 +69,9 @@ Measured on the live APIs by `make smoke` (n=1 per provider, 2026-11-04):
 | LLM validated JSON (`openai/gpt-oss-120b`) | 762–1769 ms |
 | Fallback recovery after a 404 | 595–813 ms |
 
-Not built yet: the intelligence layer (entities, scam stages, pressure score, canaries,
-hang-up risk), the control-room dashboard, and the evidence pack. See [PLAN.md](PLAN.md) for the phase plan and
+Not built yet: the control-room dashboard and the evidence pack (PDF). The simulator page
+already shows the stage, pressure, risk, extracted entities and any identity leak, so the
+data the dashboard needs is all flowing. See [PLAN.md](PLAN.md) for the phase plan and
 [docs/DECISIONS.md](docs/DECISIONS.md) for why the architecture looks like this.
 
 ## Which Gnani models are used, and where
@@ -148,7 +156,7 @@ cp .env.example .env     # then fill in GNANI_API_KEY and the LLM_* values
 make install             # venv on 3.11 + dev dependencies
 make up                  # postgres + redis
 make migrate             # apply the baseline schema
-make test                # 507 tests, offline, zero API cost
+make test                # 1040 tests, offline, zero API cost
 make dev                 # api on http://localhost:8000
 ```
 
@@ -174,6 +182,7 @@ surprise on stage.
 | `make audition-male` | **Spends credits** (6 requests). Every male voice at Dada's chosen profile, to compare voices |
 | `make audition-ladder` | 1 request, or free from cache. One voice through all six realism profiles, to choose a profile |
 | `python scripts/fake_call.py` | **Spends credits** on the first run, then free from cache. Drives a whole scripted call over the WebSocket, with no microphone |
+| `python scripts/fake_call.py --leak` | As above, but the scammer quotes a canary issued to an earlier call — the identity-leak demo |
 | `python scripts/audition_voices.py --male --grandson` | **Spends credits** (6 requests). The grandson's own line in every male voice, on Dada's room and line |
 | `python scripts/audition_voices.py --voices Devansh --handoff` | Free from cache. Dada then the grandson in one clip, room tone continuous across the join — the only way to judge whether the relay reads as two people |
 | `make lint` / `make fmt` / `make types` | `ruff` and `mypy` |
@@ -236,10 +245,17 @@ real limit.
 - **TTS concurrency is one.** Timbre refuses a second active request per API key with
   `429 Only 1 active request is allowed at a time`, so synthesis is serialised in the
   adapter. Two simultaneous calls would queue behind each other (DECISIONS 0023).
-- **Groq's input-token limit caps call pace.** The system prompt is ~6.2 KB, about 1600
-  input tokens, sent every turn; the free tier allows 7000 per minute, so roughly four turns
-  a minute before the fallback model takes over. Trimming the prompt is the obvious fix and
-  has not been done.
+- **Groq's token limit caps call pace, and analysis competes for it.** Dialogue and analysis
+  share one account at 8000 tokens a minute — roughly 1600 input tokens of dialogue plus
+  1200 of analysis per turn. Running both every turn throttled the *dialogue* model, which
+  the caller hears, so analysis now runs every second caller turn. Trimming the 6.2 KB
+  system prompt is still the obvious further fix and has not been done (DECISIONS 0025).
+- **The scam stage shown is the keyword reading, not the model's.** Where they disagree the
+  model's answer is carried alongside rather than merged, so the dashboard can show a
+  conflict. The keyword pass is reproducible; the model is not.
+- **Canary matching depends on rewriting spoken identifiers.** "at" becomes `@`, spelled-out
+  digits become digits. That rewriting is aggressive, and while a test pins that ordinary
+  Hinglish does not match, a sufficiently unlucky sentence could.
 - **The filler starts on the transcript, not on the VAD closing.** DECISIONS 0012 reasoned
   it should start earlier; the code deliberately does not, because the VAD gate needs 384 ms
   of silence and ordinary mid-sentence pauses are longer than that, so firing there would

@@ -19,6 +19,14 @@ is the easiest place to break that rule by accident. So:
   name is a plausible full name belonging to a findable person.
 * **Localities are invented**, and each contains a word no Indian locality uses.
 
+**Matching has to survive being read aloud.** This is the thing that nearly made the whole
+feature decorative. A scammer reading a handle off a lead list says it: `susila.9030@demo`
+comes back from transcription as "susila dot nine zero three zero at d e m o". Exact matching
+on the transcript found nothing, on a call that was leaking a canary by construction. So the
+transcript is also matched in a *de-spoken* form, where "at" becomes `@`, "dot" becomes `.`,
+spelled-out digits become digits, and "double"/"triple" are expanded. Verified against a real
+call rather than assumed.
+
 **Matching is token-level and deliberately conservative.** A false positive here is a claim
 that two criminals share infrastructure, which is the strongest thing the dashboard says.
 The identifier fields are matched exactly after normalisation; names are matched on surname
@@ -156,6 +164,72 @@ def is_visibly_fake(identity: CanaryIdentity) -> bool:
     )
 
 
+#: Digits as a person reads them out, English and Hinglish, including the "oh" that stands
+#: in for zero and the "o" a transcriber sometimes produces for it.
+_SPOKEN_DIGITS: dict[str, str] = {
+    "zero": "0",
+    "oh": "0",
+    "shunya": "0",
+    "one": "1",
+    "ek": "1",
+    "two": "2",
+    "do": "2",
+    "three": "3",
+    "teen": "3",
+    "four": "4",
+    "char": "4",
+    "chaar": "4",
+    "five": "5",
+    "panch": "5",
+    "paanch": "5",
+    "six": "6",
+    "chhe": "6",
+    "seven": "7",
+    "saat": "7",
+    "eight": "8",
+    "aath": "8",
+    "nine": "9",
+    "nau": "9",
+}
+
+#: Said before a digit to repeat it.
+_REPEATERS: dict[str, int] = {"double": 2, "triple": 3, "thrice": 3}
+
+_SYMBOL_WORDS: tuple[tuple[str, str], ...] = (
+    (r"\bat\s+the\s+rate\s+(?:of\s+)?", "@"),
+    (r"\bat\b", "@"),
+    (r"\bdot\b", "."),
+    (r"\bunderscore\b", "_"),
+    (r"\bhyphen\b|\bdash\b", "-"),
+)
+
+
+def despoken(text: str) -> str:
+    """Rewrite an identifier that was read aloud back into its written form.
+
+    "susila dot nine zero three zero at d e m o" becomes "susila.9030@demo". Lossy and only
+    meant for matching - never for display, and never stored as an extracted value.
+    """
+    lowered = text.casefold()
+    for pattern, symbol in _SYMBOL_WORDS:
+        lowered = re.sub(pattern, symbol, lowered)
+
+    words = re.findall(r"[a-z0-9@._-]+", lowered)
+    out: list[str] = []
+    repeat = 1
+    for word in words:
+        if word in _REPEATERS:
+            repeat = _REPEATERS[word]
+            continue
+        digit = _SPOKEN_DIGITS.get(word)
+        if digit is not None:
+            out.append(digit * repeat)
+        else:
+            out.append(word)
+        repeat = 1
+    return "".join(out)
+
+
 def _normalise(text: str) -> str:
     return re.sub(r"[\s.-]+", "", text).casefold()
 
@@ -174,7 +248,10 @@ def find_matches(
     invented surname must appear, because the surnames are unique but the given names are
     not and matching on one alone would fire constantly.
     """
+    # Two haystacks: the transcript as written, and the transcript with spoken identifiers
+    # rewritten. A scammer reading from a list produces the second form, not the first.
     haystack = _normalise(text)
+    spoken = _normalise(despoken(text))
     words = _tokens(text)
     matches: list[CanaryMatch] = []
 
@@ -184,7 +261,8 @@ def find_matches(
             ("phone", identity.phone, 1.0),
             ("identity_id", identity.identity_id, 1.0),
         ):
-            if _normalise(value) in haystack:
+            needle = _normalise(value)
+            if needle in haystack or needle in spoken:
                 matches.append(
                     CanaryMatch(
                         identity_id=identity.identity_id,
@@ -209,7 +287,7 @@ def find_matches(
                 )
             )
 
-        if _normalise(identity.locality) in haystack:
+        if _normalise(identity.locality) in haystack:  # localities are words, not identifiers
             matches.append(
                 CanaryMatch(
                     identity_id=identity.identity_id,

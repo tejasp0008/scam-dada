@@ -43,7 +43,16 @@ _RISK_PATTERNS: tuple[tuple[str, float, str], ...] = (
         "deferring_the_call",
     ),
     (r"\b(?:supervisor|senior|manager)\s+(?:se|ko)\b", 0.1, "escalating_internally"),
-    (r"\b(?:fake|jhooth|drama|natak|bot|robot|recording)\b", 0.4, "suspecting_a_bot"),
+    # Requires the accusation, not just the word. A real call said "case number fake C Y B
+    # triple zero one" - our own synthetic case-number prefix - and scored 0.4 for bot
+    # suspicion on a caller who had not suspected anything.
+    (
+        r"\b(?:aap|tu|yeh|this|you)\b.{0,25}\b(?:bot|robot|recording|machine|computer)\b"
+        r"|\b(?:bot|robot|recording|machine)\s+(?:ho|hai|hain|है|है\?|\?)"
+        r"|\b(?:jhooth|drama|natak)\s+(?:kar|bol|ho)\w*",
+        0.4,
+        "suspecting_a_bot",
+    ),
 )
 
 #: A scammer who stops answering is a scammer who has stopped engaging.

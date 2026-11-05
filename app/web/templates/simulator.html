@@ -103,7 +103,30 @@
       <tr><td>State</td><td id="c-state">—</td></tr>
       <tr><td>Who is holding the phone</td><td id="c-persona">—</td></tr>
       <tr><td>Scammer time wasted</td><td id="c-wasted">0s</td></tr>
+      <tr><td>Canary issued to this call</td><td id="c-canary">—</td></tr>
     </table>
+  </div>
+
+  <div class="panel">
+    <h2>Analysis</h2>
+    <table>
+      <tr><td>Scam stage</td><td id="a-stage">—</td></tr>
+      <tr><td>Pressure</td><td id="a-pressure">—</td></tr>
+      <tr><td>Hang-up risk</td><td id="a-risk">—</td></tr>
+      <tr><td>Retention tactic</td><td id="a-tactic">—</td></tr>
+    </table>
+    <div class="meter" style="margin-top:10px"><i id="risk-bar" style="background:var(--danger)"></i></div>
+    <p class="note" id="a-signals"></p>
+  </div>
+
+  <div class="panel">
+    <h2>Extracted intelligence</h2>
+    <div id="entities"><p class="note">Nothing extracted yet.</p></div>
+  </div>
+
+  <div class="panel" id="leak-panel" hidden>
+    <h2>Identity leak</h2>
+    <div id="leaks"></div>
   </div>
 </main>
 
@@ -217,6 +240,9 @@ function resample(samples, from, to) {
 function onControl(message) {
   if (message.type === "ready") {
     ui("callid").textContent = message.call_id;
+    if (message.canary) {
+      ui("c-canary").textContent = `${message.canary.full_name} · ${message.canary.upi_handle}`;
+    }
   } else if (message.type === "flush") {
     // Barge-in: drop everything queued, or the persona talks over the scammer for as long
     // as the ring buffer is deep.
@@ -244,10 +270,62 @@ function onEvent(event) {
     ui("m-filler").textContent = event.filler_played ? "yes" : "no";
   } else if (event.type === "state_change") {
     ui("c-state").textContent = event.to_state;
+  } else if (event.type === "stage") {
+    ui("a-stage").textContent = event.stage;
+    ui("a-stage").style.color = event.stage === "payment" ? "var(--danger)" : "";
+    ui("a-pressure").textContent = Math.round(event.pressure_score * 100) + "%";
+  } else if (event.type === "risk") {
+    ui("a-risk").textContent = Math.round(event.hangup_risk * 100) + "%";
+    ui("risk-bar").style.width = Math.round(event.hangup_risk * 100) + "%";
+    ui("a-tactic").textContent = event.tactic || "none";
+    // The signals are shown beside the gauge on purpose: a number the operator cannot
+    // explain is a number they will not trust.
+    ui("a-signals").textContent = event.signals && event.signals.length
+      ? "Signals: " + event.signals.join(", ")
+      : "";
+  } else if (event.type === "entity") {
+    addEntity(event);
+  } else if (event.type === "canary_match") {
+    addLeak(event);
   } else if (event.type === "persona_handoff") {
     ui("c-persona").textContent = event.to_persona;
     addTurn("persona", `${event.from_persona} hands the phone to ${event.to_persona} — ${event.reason}`, "handoff");
   }
+}
+
+const entityLabels = {
+  upi_id: "UPI handle", phone: "Phone", ifsc: "IFSC", amount: "Amount",
+  officer_name: "Claimed name", organisation: "Claimed organisation", case_number: "Case number",
+};
+
+function addEntity(event) {
+  const panel = ui("entities");
+  if (panel.querySelector(".note")) panel.innerHTML = "";
+  const row = document.createElement("div");
+  row.className = "turn";
+  const label = document.createElement("div");
+  label.className = "who";
+  // Which machine found it, and how sure, because the evidence pack has to say.
+  label.textContent = `${entityLabels[event.entity_type] || event.entity_type} · ${event.source}`
+    + (event.source === "llm" ? ` · ${Math.round(event.confidence * 100)}%` : "");
+  const value = document.createElement("div");
+  value.textContent = event.value;
+  row.append(label, value);
+  panel.append(row);
+}
+
+function addLeak(event) {
+  ui("leak-panel").hidden = false;
+  const row = document.createElement("div");
+  row.className = "turn";
+  const label = document.createElement("div");
+  label.className = "who";
+  label.style.color = "var(--danger)";
+  label.textContent = `${event.matched_field} · ${Math.round(event.score * 100)}% · issued to call ${event.issued_call_id.slice(0, 8)}`;
+  const value = document.createElement("div");
+  value.textContent = `"${event.matched_text}" was given to an earlier call and this caller just said it.`;
+  row.append(label, value);
+  ui("leaks").append(row);
 }
 
 function tickWasted() {

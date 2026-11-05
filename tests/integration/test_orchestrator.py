@@ -13,11 +13,13 @@ import numpy as np
 import pytest
 
 from app.core.audio.framing import float32_to_pcm
+from app.core.canary import issue
 from app.core.events import EventType
-from app.core.models import PersonaId, Speaker
+from app.core.models import EntitySource, EntityType, PersonaId, ScamStage, Speaker
 from app.core.state import CallState
 from app.providers.base import Role, SttConfig
 from app.providers.mock import MockLLMProvider, MockSTTProvider, MockTTSProvider
+from app.services.canary_registry import CanaryRegistry
 from app.services.orchestrator import CallConfig, CallOrchestrator
 from app.services.recorder import CallRecorder
 
@@ -64,6 +66,7 @@ def build(
     handoff_after: int = 2,
     sink: list[bytes] | None = None,
     chunk_delay_s: float = 0.0,
+    canary: CanaryRegistry | None = None,
 ) -> tuple[CallOrchestrator, CallRecorder, list[bytes], MockLLMProvider]:
     out: list[bytes] = sink if sink is not None else []
     llm = MockLLMProvider(replies or ("Haan beta, ek minute. Main likh raha hoon.",))
@@ -93,6 +96,7 @@ def build(
         recorder=recorder,
         voices=VOICES,
         sink=write,
+        canary=canary,
     )
     return orchestrator, recorder, out, llm
 
@@ -338,3 +342,134 @@ class TestHandoffContext:
         with_note = [m for m in llm.chat_calls if any(x.role is Role.SYSTEM for x in m[1:])]
         assert with_note
         assert with_note[-1][-1].role is Role.SYSTEM
+
+
+class TestIntelligence:
+    """The analysis pass, wired in. It must produce events and never affect the reply."""
+
+    async def test_stage_entity_and_risk_events_are_emitted(self) -> None:
+        orchestrator, recorder, _, _ = build(
+            script=("Main Delhi cyber crime se inspector Sharma bol raha hoon.",),
+            frames_per_utterance=6,
+        )
+        await orchestrator.run(audio(speech_frames=8, silence_frames=4, bursts=1))
+
+        kinds = {event.type for event in recorder.history()}
+        assert EventType.STAGE in kinds
+        assert EventType.RISK in kinds
+        assert EventType.ENTITY in kinds
+
+    async def test_the_stage_reaches_payment_on_a_payment_line(self) -> None:
+        orchestrator, recorder, _, _ = build(
+            script=("Do lakh fake.officer@demo par UPI se bhej dijiye.",), frames_per_utterance=6
+        )
+        await orchestrator.run(audio(speech_frames=8, silence_frames=4, bursts=1))
+        stages = [e for e in recorder.history() if e.type is EventType.STAGE]
+        assert stages
+        assert stages[-1].stage is ScamStage.PAYMENT
+
+    async def test_entities_from_the_transcript_are_reported_once_each(self) -> None:
+        """The dashboard list only grows, so a repeated handle must not appear twice."""
+        line = "Do lakh fake.officer@demo par bhejiye."
+        orchestrator, recorder, _, _ = build(script=(line, line), frames_per_utterance=5)
+        await orchestrator.run(audio(speech_frames=6, silence_frames=3, bursts=2))
+
+        handles = [
+            e
+            for e in recorder.history()
+            if e.type is EventType.ENTITY and e.entity_type is EntityType.UPI_ID
+        ]
+        assert len(handles) == 1
+        assert handles[0].value == "fake.officer@demo"
+        assert handles[0].source is EntitySource.REGEX
+
+    async def test_the_persona_still_replies_when_analysis_is_off(self) -> None:
+        """Proof the reply path does not depend on the analysis path."""
+        orchestrator, recorder, out, _ = build()
+        orchestrator._config.analysis_enabled = False
+        await orchestrator.run(audio(speech_frames=8, silence_frames=4, bursts=1))
+
+        assert out
+        assert [
+            e
+            for e in recorder.history()
+            if e.type is EventType.TRANSCRIPT and e.speaker is Speaker.PERSONA
+        ]
+        assert not [e for e in recorder.history() if e.type is EventType.STAGE]
+
+    async def test_a_hook_is_armed_when_the_caller_threatens_to_leave(self) -> None:
+        orchestrator, recorder, _, llm = build(
+            script=(
+                "Aap mera time waste kar rahe hain, main phone rakh raha hoon.",
+                "Haan jaldi boliye.",
+            ),
+            frames_per_utterance=5,
+            handoff_after=99,
+        )
+        await orchestrator.run(audio(speech_frames=6, silence_frames=3, bursts=2))
+
+        risks = [e for e in recorder.history() if e.type is EventType.RISK]
+        assert risks
+        assert max(e.hangup_risk for e in risks) >= 0.45
+        # The hook has to reach the dialogue prompt, or the risk score changed nothing.
+        instructions = [
+            m.content for messages in llm.chat_calls for m in messages if m.role is Role.SYSTEM
+        ]
+        assert any("close to ending the call" in text for text in instructions)
+
+    async def test_no_hook_is_armed_on_a_calm_call(self) -> None:
+        orchestrator, _, _, llm = build(
+            script=("Haan ji, main cyber cell se bol raha hoon.",), frames_per_utterance=6
+        )
+        await orchestrator.run(audio(speech_frames=8, silence_frames=4, bursts=1))
+        instructions = [
+            m.content for messages in llm.chat_calls for m in messages if m.role is Role.SYSTEM
+        ]
+        assert not any("close to ending the call" in text for text in instructions)
+
+
+class TestCanaryInTheLoop:
+    async def test_a_canary_from_an_earlier_call_is_flagged(self) -> None:
+        """The strongest claim the system makes: two calls on one lead list."""
+        earlier = issue("call-earlier")
+        registry = CanaryRegistry("call-test")
+        registry._prior = [("call-earlier", earlier)]
+
+        orchestrator, recorder, _, _ = build(
+            script=(f"Aapka account {earlier.upi_handle} verify karna hai.",),
+            frames_per_utterance=6,
+            canary=registry,
+        )
+        await orchestrator.run(audio(speech_frames=8, silence_frames=4, bursts=1))
+
+        matches = [e for e in recorder.history() if e.type is EventType.CANARY_MATCH]
+        assert len(matches) == 1
+        assert matches[0].issued_call_id == "call-earlier"
+        assert matches[0].matched_field == "upi_handle"
+
+    async def test_a_repeated_leak_is_reported_once(self) -> None:
+        """Three identical alerts would make the dashboard look broken."""
+        earlier = issue("call-earlier")
+        registry = CanaryRegistry("call-test")
+        registry._prior = [("call-earlier", earlier)]
+        line = f"{earlier.upi_handle} par bhejiye."
+
+        orchestrator, recorder, _, _ = build(
+            script=(line, line, line), frames_per_utterance=4, canary=registry
+        )
+        await orchestrator.run(audio(speech_frames=5, silence_frames=3, bursts=3))
+        assert len([e for e in recorder.history() if e.type is EventType.CANARY_MATCH]) == 1
+
+    async def test_an_ordinary_call_flags_nothing(self) -> None:
+        registry = CanaryRegistry("call-test")
+        registry._prior = [("call-earlier", issue("call-earlier"))]
+        orchestrator, recorder, _, _ = build(
+            script=("Do lakh fake.officer@demo par bhejiye.",),
+            frames_per_utterance=6,
+            canary=registry,
+        )
+        await orchestrator.run(audio(speech_frames=8, silence_frames=4, bursts=1))
+        assert not [e for e in recorder.history() if e.type is EventType.CANARY_MATCH]
+
+    async def test_each_call_gets_its_own_identity(self) -> None:
+        assert CanaryRegistry("call-a").identity != CanaryRegistry("call-b").identity

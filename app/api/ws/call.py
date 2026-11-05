@@ -29,6 +29,7 @@ from app.core.models import PersonaId
 from app.core.state import CallState
 from app.infra.models_sql import Call as CallRow
 from app.providers.base import BudgetExceeded, ProviderError, SttConfig
+from app.services.canary_registry import CanaryRegistry
 from app.services.orchestrator import CallConfig, CallOrchestrator
 from app.services.recorder import CallRecorder
 
@@ -72,6 +73,9 @@ async def call_socket(socket: WebSocket) -> None:
 
     await _create_call_row(resources, call_id)
     recorder = CallRecorder(call_id, resources.bus, resources.session_factory)
+    # The registry needs the database: a leak is by definition cross-call, so detecting one
+    # means comparing against identities issued to calls this process never saw.
+    canary = CanaryRegistry(call_id, resources.session_factory)
 
     async def sink(chunk: bytes) -> None:
         await socket.send_bytes(chunk)
@@ -98,6 +102,7 @@ async def call_socket(socket: WebSocket) -> None:
             tts_language=settings.tts_language,
             sample_rate_in=INBOUND_SAMPLE_RATE,
             sample_rate_out=OUTBOUND_SAMPLE_RATE,
+            analysis_model=settings.analysis_model,
         ),
         stt=resources.stt,
         tts=resources.tts,
@@ -106,12 +111,16 @@ async def call_socket(socket: WebSocket) -> None:
         voices=voices,
         sink=sink,
         flush=flush,
+        canary=canary,
     )
 
     await socket.send_json(
         {
             "type": "ready",
             "call_id": call_id,
+            # The operator sees which fictional identity this call will hand out, so the
+            # demo can show a canary being issued and later caught.
+            "canary": canary.identity.model_dump(mode="json"),
             "sample_rate_in": INBOUND_SAMPLE_RATE,
             "sample_rate_out": OUTBOUND_SAMPLE_RATE,
         }
@@ -142,7 +151,7 @@ async def call_socket(socket: WebSocket) -> None:
         await asyncio.sleep(0.05)
         relay.cancel()
         await asyncio.gather(relay, return_exceptions=True)
-        await _finish_call_row(resources, call_id, orchestrator)
+        await _finish_call_row(resources, call_id, orchestrator, canary.identity.identity_id)
         logger.info(
             "call ended",
             extra={
@@ -217,7 +226,10 @@ async def _create_call_row(resources: AppResources, call_id: str) -> None:
 
 
 async def _finish_call_row(
-    resources: AppResources, call_id: str, orchestrator: CallOrchestrator
+    resources: AppResources,
+    call_id: str,
+    orchestrator: CallOrchestrator,
+    canary_identity_id: str | None = None,
 ) -> None:
     """Write the outcome: final state, why it ended, and who held the phone."""
     try:
@@ -231,6 +243,7 @@ async def _finish_call_row(
                     final_state=orchestrator.state.value,
                     ended_reason=(orchestrator.ended_reason or "")[:64] or None,
                     persona_sequence=[p.value for p in orchestrator.persona_sequence],
+                    canary_identity_id=canary_identity_id,
                     scammer_seconds_wasted=orchestrator.elapsed_ms() / 1000.0,
                 )
             )

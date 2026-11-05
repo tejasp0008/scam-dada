@@ -12,12 +12,13 @@ from app.core.canary import (
     CANARY_PHONE_PREFIX,
     CANARY_UPI_SUFFIX,
     canary_ifsc,
+    despoken,
     find_matches,
     is_visibly_fake,
     issue,
 )
 from app.core.extract import extract_from_turn
-from app.core.models import EntityType
+from app.core.models import CanaryIdentity, EntityType
 
 CALLS = [f"call-{i:04d}" for i in range(300)]
 
@@ -151,3 +152,89 @@ class TestLeakDetection:
 
     def test_an_empty_transcript_matches_nothing(self) -> None:
         assert find_matches("", [("call-A", issue("call-A"))]) == ()
+
+
+class TestReadAloudMatching:
+    """From a real call that leaked a canary by construction and detected nothing.
+
+    A scammer reading a handle off a lead list says it out loud, and transcription gives it
+    back as words: `susila.9030@demo` arrives as "susila dot nine zero three zero at d e m o".
+    Without this the detector would essentially never fire, and feature 4 would be decorative.
+    """
+
+    #: The exact transcript Prisma returned on the call that failed to detect its own leak.
+    REAL_TRANSCRIPT = (
+        "humare record mein aapka handle susila dot nine zero three zero at d e m o hai "
+        "wahi confirm kijiye"
+    )
+
+    def test_the_transcript_that_was_missed_now_matches(self) -> None:
+        identity = CanaryIdentity(
+            identity_id="canary-00000000",
+            full_name="Sushila Khidki",
+            upi_handle="susila.9030@demo",
+            locality="Demo Nagar",
+            phone="0012345678",
+            issued_at_ms=0,
+        )
+        matches = find_matches(self.REAL_TRANSCRIPT, [("call-earlier", identity)])
+        assert [m.matched_field for m in matches] == ["upi_handle"]
+        assert matches[0].score == 1.0
+
+    @pytest.mark.parametrize(
+        ("spoken", "expected"),
+        [
+            ("at", "@"),
+            ("dot", "."),
+            ("nine zero three zero", "9030"),
+            ("one two three", "123"),
+            ("double zero one", "001"),
+            ("triple zero one", "0001"),
+            ("oh nine", "09"),
+            ("ek do teen", "123"),
+            ("underscore", "_"),
+        ],
+    )
+    def test_spoken_forms_are_rewritten(self, spoken: str, expected: str) -> None:
+        assert despoken(spoken) == expected
+
+    def test_a_phone_number_read_out_digit_by_digit_matches(self) -> None:
+        identity = CanaryIdentity(
+            identity_id="canary-00000000",
+            full_name="Prem Tijori",
+            upi_handle="prem.1111@demo",
+            locality="Demo Nagar",
+            phone="0012345678",
+            issued_at_ms=0,
+        )
+        spoken = "number zero zero one two three four five six seven eight hai"
+        matches = find_matches(spoken, [("call-earlier", identity)])
+        assert "phone" in [m.matched_field for m in matches]
+
+    def test_the_written_form_still_matches(self) -> None:
+        identity = issue("call-A")
+        matches = find_matches(f"handle {identity.upi_handle} hai", [("call-A", identity)])
+        assert [m.matched_field for m in matches] == ["upi_handle"]
+
+    def test_an_ordinary_sentence_does_not_match_after_rewriting(self) -> None:
+        """The rewriting is aggressive, so this is the test that it has not become a
+        false-positive machine: "at" and "do" appear constantly in Hinglish."""
+        identity = issue("call-A")
+        text = (
+            "Haan beta, do minute ruko. Main ghar at home hoon, teen baje aana. "
+            "Ek do teen char, sab theek hai."
+        )
+        assert find_matches(text, [("call-A", identity)]) == ()
+
+    def test_despoken_is_only_used_for_matching_not_reported(self) -> None:
+        """A de-spoken string is lossy; the match reports the identity's real value."""
+        identity = CanaryIdentity(
+            identity_id="canary-00000000",
+            full_name="Sushila Khidki",
+            upi_handle="susila.9030@demo",
+            locality="Demo Nagar",
+            phone="0012345678",
+            issued_at_ms=0,
+        )
+        match = find_matches(self.REAL_TRANSCRIPT, [("call-earlier", identity)])[0]
+        assert match.matched_text == "susila.9030@demo"

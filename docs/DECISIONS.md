@@ -764,3 +764,81 @@ prompt is the obvious optimisation and has not been done yet.
 port 8000 as well, so a locally run `uvicorn` and a stale container both answer there — and
 `/readyz` was reporting mock providers from the container while the real server ran beside
 it. Stop the container, or use a different port.
+
+## 0025 — Phase 3: two readings of the transcript, and which one wins
+*2026-11-06 · Phase 3*
+
+The intelligence layer runs twice over every transcript and reports both answers.
+
+**The deterministic pass** (`app/core/extract.py`, `stages.py`, `risk.py`) is regex and
+arithmetic. Everything it reports is reproducible, auditable and free, and lands with
+`source=REGEX` at full confidence. The dashboard renders from this alone if there is no model
+at all.
+
+**The model pass** (`app/services/analysis.py`) adds what regex cannot see and lands with
+`source=LLM` and its own confidence. On a live call it reconstructed `officer@demo` from the
+transcript "fake dot officer at d e m o" and `CYB001` from "C Y B triple zero one" — both
+spoken letter by letter, both invisible to a pattern.
+
+**Where they disagree about the stage, the disagreement is recorded rather than resolved.**
+The deterministic reading is the one shown; the model's is carried alongside so the dashboard
+can display a conflict. An invented agreement would be worse than a visible disagreement. The
+model may advance the stage but never drag it backwards, and the pressure reading takes the
+higher of the two, because under-reporting pressure is the expensive direction — it decides
+whether a retention hook is thrown.
+
+**Analysis never touches the dialogue path.** It runs as its own task per turn; the reply does
+not wait for it, does not change because of it, and does not fail when it fails. A dead model
+costs dashboard detail and nothing else. Three tests assert that the persona still replies
+with analysis switched off entirely.
+
+### What a live call found that the test suite could not
+
+**The canary detector did not detect a canary.** The worst possible outcome for the most
+distinctive feature in the project. The call was leaking one by construction: `susila.9030@demo`
+had been issued to an earlier call, and the scammer read it aloud. Prisma returned it as
+"susila dot nine zero three zero at d e m o", so exact matching found nothing.
+
+A scammer reading from a lead list *says* the identifier. So the transcript is now also
+matched in a de-spoken form — "at" becomes `@`, "dot" becomes `.`, spelled-out digits become
+digits, and "double"/"triple" expand. Re-verified live: a canary issued to one call was caught
+in a later one and attributed back to the call that issued it. The exact transcript that was
+missed is pinned as a test, and so is the inverse — that an ordinary Hinglish sentence
+containing "at", "do" and "teen" still matches nothing, because that rewriting is aggressive
+enough to be a false-positive machine if it were not checked.
+
+**Four precision bugs, all false positives, all visible in one transcript.**
+
+* `case_number = "NIKAL"` from "warrant nikal jayega", and `case_number = "FAKE"` from "case
+  number fake C Y B...". A case number now has to contain a digit; every real one does, and
+  an all-letters token after the keyword is just the next word of the sentence.
+* `suspecting_a_bot` scored 0.4 because the pattern contained the bare word "fake" — which
+  came from our own synthetic case-number prefix, on a caller who had suspected nothing. The
+  pattern now requires the accusation ("aap bot ho", "yeh recording hai"), not the word.
+* Three organisation rows for one claim: "Delhi cyber crime branch" matched the cell, the
+  branch and the police patterns. The more specific label now subsumes the others.
+* The badge never reached `payment` on "chhota amount bhej dijiye", because the pattern
+  required the verb before the noun. It is now order-independent — and that was the single
+  line in the call that most needed to move the badge.
+
+**An ellipsis is hesitation, not punctuation.** `take_sentence` treated `...` as a sentence
+end, so the orchestrator spoke "Inspector..." as a complete utterance. Then the terse reply
+entered the conversation history, the model imitated it, and the next four turns were
+two-word fragments. Trailing off is most of what this persona does, so a run of two or more
+dots no longer ends a sentence; `?!` still does. The prompts also now state a floor of eight
+words and forbid opening a reply with an audio tag.
+
+**Analysis competes with dialogue for the same token budget, and dialogue loses audibly.**
+Both share one Groq account at 8000 tokens a minute: roughly 1600 input tokens of dialogue
+plus 1200 of analysis per turn. Running both every turn throttled the *dialogue* model, which
+the caller hears, while the analysis failures were invisible. Analysis now runs every second
+caller turn — always the first, so the dashboard is never blank through the opening — because
+stage and risk move slowly enough that nothing a human would notice is lost.
+
+**Entities are written to their own table as well as the event log.** Redundant with the JSONB
+payload on purpose: the evidence pack needs "every identifier from this call" and "every call
+that mentioned this handle", and neither is a reasonable question to ask of a JSONB column.
+
+**A note on test environments.** SQLite does not enforce foreign keys unless asked, so a test
+that provokes a write failure with one passes here for the wrong reason and proves nothing
+about Postgres. The recorder's failure test injects the failure instead.

@@ -67,7 +67,11 @@ _STAGE_PATTERNS: dict[ScamStage, tuple[tuple[str, float], ...]] = {
     ),
     ScamStage.PAYMENT: (
         (r"\b(?:upi|paytm|gpay|phonepe|google\s+pay)\b", 0.9),
-        (r"\b(?:transfer|bhej|bhejiye|bhejna|send)\b.{0,30}\b(?:amount|paisa|rupaye|rs)\b", 0.9),
+        # Either order. A real call said "chhota amount bhej dijiye", which a
+        # verb-then-noun pattern missed entirely - and that was the line that should have
+        # moved the badge to payment.
+        (r"\b(?:transfer|bhej\w*|send|deposit)\b.{0,30}\b(?:amount|paisa|rupaye|rs)\b", 0.9),
+        (r"\b(?:amount|paisa|rupaye|payment)\b.{0,30}\b(?:transfer|bhej\w*|send|kar\s+d)\w*", 0.9),
         (r"\b(?:lakh|hazaar|hazar|crore)\b", 0.7),
         (r"\b(?:account|khata)\s*(?:number|no\.?)\b", 0.8),
         (r"\b(?:ifsc|neft|imps|rtgs)\b", 0.9),

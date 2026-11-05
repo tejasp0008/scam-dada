@@ -232,3 +232,22 @@ class TestFillerFiles:
     def test_personas_do_not_share_a_filler_file(self, profile: PersonaProfile) -> None:
         files = [other.filler_file for other in RELAY]
         assert len(files) == len(set(files))
+
+
+class TestReplyLengthGuidance:
+    """From a real call: four turns of two-word fragments, each copying the last.
+
+    Once one terse reply is in the conversation history the model imitates it, so the floor
+    has to be stated in the prompt as well as fixed in `take_sentence`.
+    """
+
+    @pytest.mark.parametrize("profile", RELAY, ids=lambda p: p.persona_id.value)
+    def test_a_minimum_reply_length_is_stated(self, profile: PersonaProfile) -> None:
+        assert "fewer than eight words" in (PROMPT_DIR / profile.prompt_file).read_text()
+
+    @pytest.mark.parametrize("profile", RELAY, ids=lambda p: p.persona_id.value)
+    def test_opening_with_a_tag_is_forbidden(self, profile: PersonaProfile) -> None:
+        """A tag at the front is silence where a pause costs the caller's patience."""
+        assert (
+            "Never open a reply with an audio tag" in (PROMPT_DIR / profile.prompt_file).read_text()
+        )

@@ -20,7 +20,9 @@ from pydantic import TypeAdapter
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.core.events import DomainEvent
+from app.core.models import Entity as DomainEntity
 from app.core.models import Turn as DomainTurn
+from app.infra.models_sql import Entity as EntityRow
 from app.infra.models_sql import Event as EventRow
 from app.infra.models_sql import Turn as TurnRow
 from app.infra.redis_bus import EventBus
@@ -111,6 +113,32 @@ class CallRecorder:
         """Persist a completed turn. Fire and forget: nothing on the call path reads it back."""
         if self._sessions is not None:
             self._schedule(self._persist_turn(turn, latency or {}))
+
+    def record_entity(self, entity: DomainEntity) -> None:
+        """Persist an extracted entity to its own table as well as to the event log.
+
+        Redundant with the `events` payload on purpose: the evidence pack needs to query
+        "every identifier from this call" and "every call that mentioned this handle", and
+        neither is a reasonable question to ask of a JSONB column.
+        """
+        if self._sessions is not None:
+            self._schedule(self._persist_entity(entity))
+
+    async def _persist_entity(self, entity: DomainEntity) -> None:
+        assert self._sessions is not None
+        try:
+            async with self._sessions() as session, session.begin():
+                session.add(
+                    EntityRow(
+                        call_id=self._call_id,
+                        entity_type=entity.entity_type.value,
+                        value=entity.value,
+                        source=entity.source.value,
+                        confidence=entity.confidence,
+                    )
+                )
+        except Exception:
+            logger.exception("persisting an entity failed", extra={"call_id": self._call_id})
 
     def _schedule(self, coro: Coroutine[object, object, None]) -> None:
         task = asyncio.create_task(coro)

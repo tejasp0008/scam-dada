@@ -163,6 +163,9 @@ async def run_call(url: str, lines: list[np.ndarray], out: Path) -> int:
                 elif kind == "event":
                     events.append(payload["event"])
                     _print_event(payload["event"])
+                elif kind == "ready" and payload.get("canary"):
+                    canary = payload["canary"]
+                    print(f"  canary issued: {canary['full_name']} / {canary['upi_handle']}")
                 elif kind == "error":
                     print(f"  <- error: {payload['message']}", file=sys.stderr)
                 elif kind == "ended":
@@ -207,10 +210,23 @@ async def run_call(url: str, lines: list[np.ndarray], out: Path) -> int:
         print(f"\nPersona audio: {len(received) / 2 / 24000:.1f}s -> {path}")
     (out / f"{name}.events.json").write_text(json.dumps(events, indent=2))
 
-    transcript = [e for e in events if e.get("type") == "transcript"]
-    latency = [e for e in events if e.get("type") == "latency"]
-    handoffs = [e for e in events if e.get("type") == "persona_handoff"]
-    print(f"Events: {len(events)}  transcripts: {len(transcript)}  handoffs: {len(handoffs)}")
+    def of(kind: str) -> list[dict[str, object]]:
+        return [e for e in events if e.get("type") == kind]
+
+    latency = of("latency")
+    print(
+        f"Events: {len(events)}  transcripts: {len(of('transcript'))}  "
+        f"handoffs: {len(of('persona_handoff'))}  entities: {len(of('entity'))}  "
+        f"leaks: {len(of('canary_match'))}"
+    )
+    if stages := of("stage"):
+        print(f"Final stage: {stages[-1].get('stage')}")
+    if entities := of("entity"):
+        print("Extracted:")
+        for entity in entities:
+            print(
+                f"  {entity.get('entity_type'):16} {entity.get('value')!r} [{entity.get('source')}]"
+            )
     print(f"Barge-ins: {flushes}")
     if latency:
         _print_latency(latency)
@@ -229,6 +245,27 @@ def _print_event(event: dict[str, object]) -> None:
         print(f"  <- state: {event.get('from_state')} -> {event.get('to_state')}")
     elif kind == "persona_handoff":
         print(f"  <- handoff: {event.get('from_persona')} -> {event.get('to_persona')}")
+    elif kind == "stage":
+        print(
+            f"  <- stage: {event.get('stage')} "
+            f"(confidence {event.get('confidence')}, pressure {event.get('pressure_score')})"
+        )
+    elif kind == "entity":
+        print(
+            f"  <- entity [{event.get('source')}] {event.get('entity_type')} = "
+            f"{event.get('value')!r}"
+        )
+    elif kind == "risk":
+        raw = event.get("signals")
+        named = raw if isinstance(raw, list) else []
+        signals = ", ".join(str(item) for item in named) or "none"
+        tactic = event.get("tactic") or "none"
+        print(f"  <- risk: {event.get('hangup_risk')} [{signals}] tactic={tactic}")
+    elif kind == "canary_match":
+        print(
+            f"  <- LEAK: {event.get('matched_field')} {event.get('matched_text')!r} was "
+            f"issued to call {str(event.get('issued_call_id'))[:8]}"
+        )
 
 
 def _print_latency(latency: list[dict[str, object]]) -> None:
@@ -246,16 +283,58 @@ def _print_latency(latency: list[dict[str, object]]) -> None:
         )
 
 
+async def _latest_canary() -> str | None:
+    """The UPI handle of the most recently issued canary, if there is one.
+
+    Read straight from the database rather than remembered between runs, so the leak demo
+    works on a fresh checkout after a single ordinary call.
+    """
+    from sqlalchemy import select
+
+    from app.infra.db import create_engine, create_session_factory
+    from app.infra.models_sql import CanaryIdentity as CanaryRow
+
+    settings = get_settings()
+    engine = create_engine(settings)
+    sessions = create_session_factory(engine)
+    try:
+        async with sessions() as session:
+            rows = await session.execute(
+                select(CanaryRow).order_by(CanaryRow.issued_at.desc()).limit(1)
+            )
+            row = rows.scalars().first()
+            if row is None:
+                return None
+            handle = row.identity.get("upi_handle")
+            return str(handle) if handle else None
+    finally:
+        await engine.dispose()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="ws://127.0.0.1:8000/ws/call")
     parser.add_argument("--out", type=Path, default=Path("var/calls"))
     parser.add_argument("--lines", type=int, default=len(SCAMMER_SCRIPT))
+    parser.add_argument(
+        "--leak",
+        action="store_true",
+        help="have the scammer quote a canary identity issued to an earlier call, which is "
+        "what a shared lead list looks like from our side",
+    )
     args = parser.parse_args()
 
     configure_logging(get_settings().log_level)
     args.out.mkdir(parents=True, exist_ok=True)
     script = SCAMMER_SCRIPT[: max(1, args.lines)]
+    if args.leak:
+        leaked = asyncio.run(_latest_canary())
+        if leaked is None:
+            print("no earlier canary to leak; run a call without --leak first", file=sys.stderr)
+            return 2
+        # Spoken as a scammer reading from a list, which is exactly the scenario.
+        script = (*script, f"Humare record mein aapka handle {leaked} hai, wahi confirm kijiye.")
+        print(f"Leaking a canary from an earlier call: {leaked}\n")
     print(f"Driving a {len(script)}-line call at {args.url}\n")
     return asyncio.run(_drive(args.url, script, args.out))
 

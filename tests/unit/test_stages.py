@@ -169,3 +169,13 @@ class TestStageSelectionRule:
         """Keyword matching does not justify "definitely", however many keywords match."""
         assessment = assess([AUTHORITY] * 20)
         assert assessment.confidence < 1.0
+
+
+class TestFalseNegativesFromRealCalls:
+    def test_amount_before_the_verb_still_reaches_payment(self) -> None:
+        """A real call said "chhota amount bhej dijiye" and the badge never left isolation -
+        the one line that should have moved it, missed by a verb-then-noun pattern."""
+        assert assess(["Verification ke liye chhota amount bhej dijiye"]).stage is ScamStage.PAYMENT
+
+    def test_verb_before_the_amount_still_works(self) -> None:
+        assert assess(["Bhej dijiye amount abhi"]).stage is ScamStage.PAYMENT

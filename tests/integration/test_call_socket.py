@@ -158,3 +158,53 @@ class TestPage:
         worklet = client.get("/static/capture-worklet.js").text
         assert "FRAME_SAMPLES = 512" in worklet
         assert "TARGET_RATE = 16000" in worklet
+
+
+class TestCanaryHandshake:
+    def test_the_ready_message_names_the_canary_issued_to_this_call(
+        self, call_client: TestClient
+    ) -> None:
+        """The demo has to be able to show a canary being issued and later caught."""
+        with call_client.websocket_connect("/ws/call") as socket:
+            ready = socket.receive_json()
+            canary = ready["canary"]
+            assert canary["upi_handle"].endswith("@demo")
+            assert canary["phone"].startswith("00")
+            socket.send_text("hangup")
+            drain(socket)
+
+    def test_two_calls_are_issued_different_identities(self, call_client: TestClient) -> None:
+        identities = []
+        for _ in range(2):
+            with call_client.websocket_connect("/ws/call") as socket:
+                identities.append(socket.receive_json()["canary"]["identity_id"])
+                socket.send_text("hangup")
+                drain(socket)
+        assert identities[0] != identities[1]
+
+
+class TestPagePanels:
+    def test_the_page_renders_every_event_type_the_orchestrator_emits(
+        self, client: TestClient
+    ) -> None:
+        """A panel missing here means an event nobody can see, which is worse than no event."""
+        page = client.get("/simulator").text
+        for kind in (
+            "transcript",
+            "latency",
+            "state_change",
+            "persona_handoff",
+            "stage",
+            "risk",
+            "entity",
+            "canary_match",
+        ):
+            assert f'"{kind}"' in page, kind
+
+    def test_the_page_shows_which_machine_found_an_entity(self, client: TestClient) -> None:
+        page = client.get("/simulator").text
+        assert "event.source" in page
+
+    def test_the_page_shows_the_risk_signals_beside_the_gauge(self, client: TestClient) -> None:
+        """A number the operator cannot explain is a number they will not trust."""
+        assert "event.signals" in client.get("/simulator").text

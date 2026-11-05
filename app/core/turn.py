@@ -50,8 +50,11 @@ def take_sentence(
       for it and speaks nothing.
     * **A decimal point.** "2.5 lakh" and "₹1.5" are amounts a scammer says constantly.
       A terminator between two digits is not a sentence end.
-    * **An ellipsis or a run of terminators.** "Haan... accha" must break once, after the
-      run, not three times.
+    * **An ellipsis.** A run of two or more dots is a *hesitation*, not a sentence end -
+      which matters enormously for this persona, because trailing off is most of what he
+      does. Treating "..." as a boundary produced replies like "Inspector..." spoken on
+      their own, and once one terse reply was in the history the model copied it for the
+      rest of the call. A run of other terminators ("?!") still breaks, once, after the run.
     """
     if max_chars < min_chars:
         raise ValueError("max_chars must be >= min_chars")
@@ -67,6 +70,8 @@ def take_sentence(
         if depth > 0 or char not in SENTENCE_ENDINGS:
             continue
         if _is_decimal_point(buffer, index):
+            continue
+        if _is_ellipsis(buffer, index):
             continue
         end = _end_of_terminator_run(buffer, index)
         if len(buffer[:end].strip()) < min_chars:
@@ -88,6 +93,17 @@ def _is_decimal_point(buffer: str, index: int) -> bool:
     before = buffer[index - 1] if index > 0 else ""
     after = buffer[index + 1] if index + 1 < len(buffer) else ""
     return before.isdigit() and after.isdigit()
+
+
+def _is_ellipsis(buffer: str, index: int) -> bool:
+    """Whether this dot belongs to a run of two or more - a trailing-off, not a full stop."""
+    if buffer[index] not in ".…":
+        return False
+    if buffer[index] == "…":
+        return True
+    before = buffer[index - 1] == "." if index > 0 else False
+    after = buffer[index + 1] == "." if index + 1 < len(buffer) else False
+    return before or after
 
 
 def _end_of_terminator_run(buffer: str, index: int) -> int:

@@ -171,3 +171,23 @@ class TestHooks:
     def test_no_hook_invents_a_real_identifier(self, hook: BaitHook) -> None:
         assert not re.search(r"\b[6-9]\d{9}\b", hook.instruction)
         assert not re.search(r"\b\d{4}\s?\d{4}\s?\d{4}\b", hook.instruction)
+
+
+class TestFalsePositivesFromRealCalls:
+    def test_the_word_fake_in_a_case_number_is_not_bot_suspicion(self) -> None:
+        """A real call scored 0.4 for bot suspicion on "case number fake C Y B triple zero
+        one" - our own synthetic case-number prefix, from a caller who suspected nothing."""
+        turns = [caller("Case number fake C Y B triple zero one register ho gaya hai")]
+        assert "suspecting_a_bot" not in assess(turns).signals
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Aap koi bot ho kya",
+            "Yeh recording hai?",
+            "Aap computer se baat kar rahe ho",
+            "Natak kar rahe hain aap",
+        ],
+    )
+    def test_a_real_accusation_still_scores(self, text: str) -> None:
+        assert "suspecting_a_bot" in assess([caller(text)]).signals

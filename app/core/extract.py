@@ -127,11 +127,17 @@ _AMOUNT_WORDS = re.compile(
     re.IGNORECASE,
 )
 
-#: Case and reference numbers, as a scammer recites them. Requires a keyword, because a
-#: bare alphanumeric run matches far too much.
+#: Case and reference numbers, as a scammer recites them.
+#:
+#: Two requirements, both learned from false positives on a real call. A keyword, because a
+#: bare alphanumeric run matches far too much. And **at least one digit**, because without
+#: it "warrant nikal jayega" yielded the case number "NIKAL" and "case number fake C Y B..."
+#: yielded "FAKE". Every real case or FIR number contains a digit; an all-letters token
+#: after the keyword is the next word of the sentence.
 _CASE_NUMBER = re.compile(
     r"\b(?:case|fir|complaint|reference|ref|docket|warrant)"
-    r"[\s.:#-]*(?:number|no\.?|num|#)?[\s.:#-]*([A-Z0-9][A-Z0-9/-]{3,24})\b",
+    r"[\s.:#-]*(?:number|no\.?|num|#)?[\s.:#-]*"
+    r"((?=[A-Z0-9/-]{4,25}\b)[A-Z0-9][A-Z0-9/-]*\d[A-Z0-9/-]*)\b",
     re.IGNORECASE,
 )
 
@@ -155,6 +161,13 @@ _ORGANISATIONS: tuple[tuple[str, str], ...] = (
     (r"\baxis\s+bank\b", "Axis Bank"),
     (r"courier\s+(?:company|service)", "courier company"),
     (r"\b(?:fedex|dhl|bluedart|blue\s*dart)\b", "courier company"),
+)
+
+#: Where one organisation label makes another redundant. A scammer who says "cyber crime
+#: branch" has made one claim, not two.
+_ORGANISATION_SUBSUMES: tuple[tuple[str, str], ...] = (
+    ("cyber crime cell", "crime branch"),
+    ("cyber crime cell", "state police"),
 )
 
 #: An officer's claimed name: a rank, an optional honorific, then a capitalised surname.
@@ -293,16 +306,23 @@ def extract_from_turn(text: str, turn_seq: int) -> tuple[Entity, ...]:
             )
         )
 
-    for pattern, label in _ORGANISATIONS:
-        if re.search(pattern, text, re.IGNORECASE):
-            found.append(
-                Entity(
-                    entity_type=EntityType.ORGANISATION,
-                    value=label,
-                    source=EntitySource.REGEX,
-                    turn_seq=turn_seq,
-                )
+    organisations = {
+        label for pattern, label in _ORGANISATIONS if re.search(pattern, text, re.IGNORECASE)
+    }
+    # "cyber crime branch" matches both patterns, and two rows for one claim reads as a bug
+    # to whoever is looking at the evidence pack. The more specific label wins.
+    for specific, general in _ORGANISATION_SUBSUMES:
+        if specific in organisations:
+            organisations.discard(general)
+    for label in sorted(organisations):
+        found.append(
+            Entity(
+                entity_type=EntityType.ORGANISATION,
+                value=label,
+                source=EntitySource.REGEX,
+                turn_seq=turn_seq,
             )
+        )
 
     for match in _OFFICER.finditer(text):
         found.append(

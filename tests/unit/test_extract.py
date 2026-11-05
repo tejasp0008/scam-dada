@@ -225,3 +225,45 @@ class TestWholeTranscript:
     def test_an_empty_transcript_yields_nothing(self) -> None:
         assert extract_all([]) == ()
         assert extract_from_turn("", 0) == ()
+
+
+class TestFalsePositivesFromRealCalls:
+    """Every case here was a wrong extraction on an actual live call.
+
+    These matter more than the happy path: the evidence pack is the deliverable, and a
+    fabricated case number in it is worse than a missing one.
+    """
+
+    def test_a_keyword_followed_by_an_ordinary_word_is_not_a_case_number(self) -> None:
+        """ "warrant nikal jayega" yielded the case number "NIKAL"."""
+        assert values("warrant nikal jayega aapke naam par", EntityType.CASE_NUMBER) == []
+
+    def test_a_spelled_out_case_number_is_left_to_the_model(self) -> None:
+        """ "case number fake C Y B triple zero one" yielded "FAKE". Regex cannot reassemble
+        a number spoken letter by letter, so reporting nothing is the correct answer."""
+        found = values(
+            "Case number fake C Y B triple zero one register ho gaya", EntityType.CASE_NUMBER
+        )
+        assert "FAKE" not in found
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "case number FAKE-CYB-0001 register ho gaya",
+            "FIR no. FAKE/2026/0001",
+            "reference number ABCD1234",
+        ],
+    )
+    def test_real_case_numbers_still_match(self, text: str) -> None:
+        assert values(text, EntityType.CASE_NUMBER)
+
+    def test_a_case_number_must_contain_a_digit(self) -> None:
+        assert values("case number ABCDEFGH", EntityType.CASE_NUMBER) == []
+
+    def test_one_organisation_claim_is_one_row(self) -> None:
+        """ "Delhi cyber crime branch" produced three rows: cell, branch and police."""
+        orgs = values("main Delhi cyber crime branch se bol raha hoon", EntityType.ORGANISATION)
+        assert orgs == ["cyber crime cell"]
+
+    def test_a_plain_police_claim_is_still_captured(self) -> None:
+        assert values("Delhi police se bol raha hoon", EntityType.ORGANISATION) == ["state police"]

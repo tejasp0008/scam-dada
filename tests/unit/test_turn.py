@@ -58,12 +58,6 @@ class TestTakeSentence:
         assert split is not None
         assert "<clears throat>" in split[0]
 
-    def test_an_ellipsis_breaks_once_after_the_run(self) -> None:
-        assert take_sentence("Haan beta ek minute... Accha") == (
-            "Haan beta ek minute...",
-            "Accha",
-        )
-
     def test_a_run_of_terminators_is_kept_with_the_sentence(self) -> None:
         split = take_sentence("Aap kaun bol rahe hain?! Mujhe samajh nahi aaya")
         assert split is not None
@@ -182,3 +176,37 @@ class TestHandoff:
     def test_a_non_positive_threshold_is_refused(self) -> None:
         with pytest.raises(ValueError, match="positive"):
             is_handoff_due([], after_persona_turns=0)
+
+
+class TestEllipsisIsHesitationNotPunctuation:
+    """From a real call. Trailing off is most of what this persona does.
+
+    Treating "..." as a sentence boundary made the orchestrator speak "Inspector..." on its
+    own, and once one terse reply was in the conversation history the model copied it for
+    the rest of the call - four turns of two-word fragments.
+    """
+
+    def test_an_ellipsis_does_not_end_a_sentence(self) -> None:
+        assert take_sentence("Inspector... haan beta kaun bol raha hai") is None
+
+    def test_the_sentence_after_an_ellipsis_still_ends_normally(self) -> None:
+        split = take_sentence("Inspector... haan beta kaun? Phir se boliye")
+        assert split is not None
+        assert split[0] == "Inspector... haan beta kaun?"
+
+    def test_a_unicode_ellipsis_behaves_the_same(self) -> None:
+        assert take_sentence("Inspector… haan beta kaun bol raha hai") is None
+
+    def test_a_single_full_stop_still_ends_a_sentence(self) -> None:
+        split = take_sentence("Haan beta ek minute. Boliye")
+        assert split is not None
+        assert split[0] == "Haan beta ek minute."
+
+    def test_a_run_of_other_terminators_still_breaks_once(self) -> None:
+        split = take_sentence("Aap kaun bol rahe hain?! Mujhe samajh nahi aaya")
+        assert split is not None
+        assert split[0].endswith("?!")
+
+    def test_a_trailing_ellipsis_is_flushed_at_the_end_of_the_stream(self) -> None:
+        """So an utterance that only trails off is still spoken, just not mid-stream."""
+        assert flush_tail("Inspector...") == "Inspector..."
