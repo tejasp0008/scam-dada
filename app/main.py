@@ -15,9 +15,10 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from app.api.deps import AppResources
-from app.api.routes import health, simulator
+from app.api.routes import calls, health, simulator
 from app.api.routes.simulator import WEB_DIR
 from app.api.ws import call as call_ws
+from app.api.ws import dashboard as dashboard_ws
 from app.infra.budget import BudgetGuard
 from app.infra.db import create_engine, create_session_factory
 from app.infra.logging import configure_logging
@@ -123,7 +124,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = resolved
     app.include_router(health.router)
     app.include_router(simulator.router)
+    app.include_router(calls.router)
     app.include_router(call_ws.router)
+    app.include_router(dashboard_ws.router)
     app.mount("/static", StaticFiles(directory=str(WEB_DIR / "static")), name="static")
     return app
 

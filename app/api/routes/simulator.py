@@ -22,5 +22,11 @@ router = APIRouter(tags=["simulator"])
 @router.get("/", response_class=HTMLResponse, include_in_schema=False)
 @router.get("/simulator", response_class=HTMLResponse)
 async def simulator(request: Request) -> HTMLResponse:
-    """The call simulator page."""
+    """The call simulator page: a scammer's handset."""
     return TEMPLATES.TemplateResponse(request, "simulator.html")
+
+
+@router.get("/dashboard", response_class=HTMLResponse)
+async def dashboard(request: Request) -> HTMLResponse:
+    """The control room. This is the page the demo video films."""
+    return TEMPLATES.TemplateResponse(request, "dashboard.html")

@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Evidence pack — call {{ summary.call_id[:8] }}</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm; }
+  body {
+    font: 11pt/1.5 "Helvetica Neue", Helvetica, Arial, sans-serif;
+    color: #15181d; margin: 0;
+  }
+  h1 { font-size: 17pt; margin: 0 0 2mm; }
+  h2 {
+    font-size: 10pt; text-transform: uppercase; letter-spacing: .08em;
+    color: #5b6472; margin: 7mm 0 2mm; border-bottom: .4pt solid #c9cfd8; padding-bottom: 1mm;
+  }
+  .sub { color: #5b6472; font-size: 9.5pt; margin: 0 0 5mm; }
+  table { width: 100%; border-collapse: collapse; }
+  td, th { padding: 1.4mm 0; text-align: left; vertical-align: top; }
+  th { font-size: 8.5pt; text-transform: uppercase; letter-spacing: .05em; color: #5b6472; }
+  .grid td:first-child { width: 48%; color: #5b6472; }
+  .num { font-variant-numeric: tabular-nums; }
+  .headline {
+    background: #f3f5f8; border: .4pt solid #c9cfd8; border-radius: 2mm;
+    padding: 4mm 5mm; margin-bottom: 5mm;
+  }
+  .headline .big { font-size: 22pt; font-weight: 650; line-height: 1.1; }
+  .turn { margin-bottom: 2.2mm; page-break-inside: avoid; }
+  .who {
+    font-size: 8pt; text-transform: uppercase; letter-spacing: .06em; color: #5b6472;
+  }
+  .caller .who { color: #a14e14; }
+  .persona .who { color: #1d6b3f; }
+  .leak {
+    border: .5pt solid #b3261e; background: #fdf1f0; border-radius: 2mm;
+    padding: 3mm 4mm; margin-bottom: 3mm;
+  }
+  .leak .who { color: #b3261e; }
+  .tag {
+    display: inline-block; font-size: 8pt; padding: .4mm 1.6mm; border-radius: 1mm;
+    background: #e7eaf0; color: #3c4450; margin-left: 1.5mm;
+  }
+  .note { color: #5b6472; font-size: 9pt; }
+  footer { margin-top: 8mm; border-top: .4pt solid #c9cfd8; padding-top: 2mm; }
+</style>
+</head>
+<body>
+
+<h1>Evidence pack</h1>
+<p class="sub">
+  Call {{ summary.call_id }} ·
+  {{ summary.started_at.strftime('%Y-%m-%d %H:%M UTC') }} ·
+  source {{ summary.source }}
+</p>
+
+<div class="headline">
+  <div class="big num">{{ '%.1f'|format(summary.minutes_wasted) }} minutes</div>
+  <div class="note">
+    of the caller's time consumed, across {{ summary.caller_turns }} of his turns and
+    {{ summary.persona_turns }} of ours.
+  </div>
+</div>
+
+<h2>Summary</h2>
+<table class="grid">
+  <tr><td>Final state</td><td>{{ summary.state.value }}</td></tr>
+  <tr><td>Ended because</td><td>{{ summary.ended_reason or 'not recorded' }}</td></tr>
+  <tr>
+    <td>Furthest scam stage reached</td>
+    <td>{{ summary.stage_reached.value if summary.stage_reached else 'not determined' }}</td>
+  </tr>
+  <tr><td>Peak pressure applied by caller</td>
+      <td class="num">{{ (summary.peak_pressure * 100)|round|int }}%</td></tr>
+  <tr><td>Peak hang-up risk</td>
+      <td class="num">{{ (summary.peak_hangup_risk * 100)|round|int }}%</td></tr>
+  <tr><td>Personas used</td>
+      <td>{{ summary.personas|map(attribute='value')|join(' → ') or 'none' }}</td></tr>
+  <tr><td>Identifiers extracted</td><td class="num">{{ summary.entity_count }}</td></tr>
+  <tr><td>Identity leaks detected</td><td class="num">{{ summary.leak_count }}</td></tr>
+</table>
+
+{% if report.leaks %}
+<h2>Identity leak</h2>
+<p class="note">
+  Details issued to an earlier call were spoken by the caller on this one. Two calls reading
+  from the same lead list is the only way this happens.
+</p>
+{% for leak in report.leaks %}
+<div class="leak">
+  <div class="who">
+    {{ leak.matched_field }} · confidence {{ (leak.score * 100)|round|int }}% ·
+    issued to call {{ leak.issued_call_id[:8] }}
+  </div>
+  <div>{{ leak.matched_text }}</div>
+</div>
+{% endfor %}
+{% endif %}
+
+<h2>Intelligence extracted</h2>
+{% if entities_by_type %}
+<table>
+  <tr><th>Type</th><th>Value</th><th>Found by</th></tr>
+  {% for kind, items in entities_by_type.items() %}
+    {% for entity in items %}
+    <tr>
+      <td>{{ entity_labels.get(kind, kind) }}</td>
+      <td>{{ entity.value }}</td>
+      <td class="note">
+        {{ entity.source.value }}{% if entity.source.value == 'llm' %}
+        · {{ (entity.confidence * 100)|round|int }}%{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  {% endfor %}
+</table>
+<p class="note">
+  Values marked <strong>regex</strong> are deterministic pattern matches and are reproducible
+  from the transcript. Values marked <strong>llm</strong> were read by a language model and
+  carry its own confidence.
+</p>
+{% else %}
+<p class="note">Nothing was extracted. The caller gave no identifiers before the call ended.</p>
+{% endif %}
+
+{% if report.canary_issued %}
+<h2>Canary identity issued to this call</h2>
+<p class="note">
+  Fictional by construction and never reused. If any of these details appear on a later call,
+  that call shares a lead list with this one.
+</p>
+<table class="grid">
+  {% for key, value in report.canary_issued.items() %}
+  <tr><td>{{ key.replace('_', ' ') }}</td><td>{{ value }}</td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+{% if report.tactics_used %}
+<h2>Retention tactics used</h2>
+<p>{{ report.tactics_used|join(', ') }}</p>
+{% endif %}
+
+<h2>Latency</h2>
+<table>
+  <tr><th>Leg</th><th>Samples</th><th>Median</th><th>p95</th><th>Worst</th></tr>
+  {% for leg in report.latency %}
+  <tr>
+    <td>{{ leg_labels.get(leg.name, leg.name) }}</td>
+    <td class="num">{{ leg.samples }}</td>
+    <td class="num">{{ leg.median_ms ~ ' ms' if leg.median_ms is not none else '—' }}</td>
+    <td class="num">{{ leg.p95_ms ~ ' ms' if leg.p95_ms is not none else '—' }}</td>
+    <td class="num">{{ leg.worst_ms ~ ' ms' if leg.worst_ms is not none else '—' }}</td>
+  </tr>
+  {% endfor %}
+</table>
+<p class="note">
+  Measured from the caller finishing speaking. A leg with no samples was never measurable on
+  this call rather than instantaneous.
+</p>
+
+<h2>Transcript</h2>
+{% for turn in report.turns %}
+<div class="turn {{ 'caller' if turn.speaker.value == 'caller' else 'persona' }}">
+  <div class="who">
+    {{ turn.persona.value if turn.persona else turn.speaker.value }} ·
+    {{ '%.1f'|format(turn.started_at_ms / 1000) }}s
+  </div>
+  <div>{{ turn.text }}</div>
+</div>
+{% endfor %}
+{% if not report.turns %}
+<p class="note">No transcript was recorded.</p>
+{% endif %}
+
+<footer class="note">
+  Generated by Scam Dada. Every identifier this system issued is fictional: phone numbers
+  begin 00 and cannot be dialled, payment handles are on a non-existent provider, and bank
+  codes are unallocated. No real person's details appear in this document.
+</footer>
+
+</body>
+</html>

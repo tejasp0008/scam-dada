@@ -8,10 +8,11 @@ fake officer names, the shape of the script.
 
 Built for the Great Indian AI Internship Challenge on Gnani's speech models.
 
-> **Status: Phase 3 complete.** A scripted call runs end to end on the live APIs —
+> **Status: Phase 4 complete.** A scripted call runs end to end on the live APIs —
 > transcript, persona replies, barge-in, the family relay, live scam-stage and risk scoring,
-> entity extraction, and cross-call canary leak detection. Nothing in this README is a
-> claimed capability unless it is listed as done below.
+> entity extraction, cross-call canary leak detection — and produces a control-room view and
+> a downloadable evidence pack. Nothing in this README is a claimed capability unless it is
+> listed as done below.
 
 ## What works today
 
@@ -46,7 +47,10 @@ Built for the Great Indian AI Internship Challenge on Gnani's speech models.
 | **Bait hooks** | Seven retention tactics, chosen by stage and used once each. Instructions rather than scripts, and none pleads or promises a payment |
 | **Canary identities** | One provably-unusable fictional identity per call, matched against every earlier one — including when the caller reads it aloud digit by digit |
 | **LLM analysis** | A validated-JSON second opinion that adds what regex cannot see, never blocks the dialogue path, and degrades to the keyword pass when the model is down |
-| Tests | 1040 offline + 64 contract, `ruff` and `mypy` clean (`mypy --strict` on `core` and `providers`) |
+| **Control room** | `/dashboard` — live call list, stage ladder, pressure and risk gauges with their signals, transcript, extracted intelligence with provenance, per-turn latency |
+| **Read API** | `/api/calls`, `/api/calls/{id}`, and `/api/calls/{id}/events?after_seq=` for a dashboard that reconnected mid-call |
+| **Evidence pack** | HTML and PDF per call: headline minutes wasted, every identifier with the machine that found it, identity leaks, latency distribution, full transcript |
+| Tests | 1115 offline + 64 contract, `ruff` and `mypy` clean (`mypy --strict` on `core` and `providers`) |
 
 Measured on two consecutive live calls through the orchestrator (2026-11-06), per turn,
 from the caller stopping speaking:
@@ -69,9 +73,20 @@ Measured on the live APIs by `make smoke` (n=1 per provider, 2026-11-04):
 | LLM validated JSON (`openai/gpt-oss-120b`) | 762–1769 ms |
 | Fallback recovery after a 404 | 595–813 ms |
 
-Not built yet: the control-room dashboard and the evidence pack (PDF). The simulator page
-already shows the stage, pressure, risk, extracted entities and any identity leak, so the
-data the dashboard needs is all flowing. See [PLAN.md](PLAN.md) for the phase plan and
+Measured on one real recorded call (2026-11-06), read back through the API:
+
+| | |
+|---|---|
+| Caller time consumed | 49.1 s across 6 caller turns |
+| Scam stage timeline | `authority → fear → payment` |
+| Peak pressure applied | 0.85 |
+| Identifiers extracted | 6, with provenance (2 regex, 4 model) |
+| Identity leaks | 1, attributed to the call that issued the canary |
+| Latency, n=6 | transcript 519 ms median · first token 273 ms (p95 1394) · first audio 472 ms |
+
+Not built yet: the robocall-versus-human check (feature 6) and Guardian Mode's handoff
+trigger. Both are modelled in the state machine but the call is currently assumed to be a
+human. See [PLAN.md](PLAN.md) for the phase plan and
 [docs/DECISIONS.md](docs/DECISIONS.md) for why the architecture looks like this.
 
 ## Which Gnani models are used, and where
@@ -156,7 +171,7 @@ cp .env.example .env     # then fill in GNANI_API_KEY and the LLM_* values
 make install             # venv on 3.11 + dev dependencies
 make up                  # postgres + redis
 make migrate             # apply the baseline schema
-make test                # 1040 tests, offline, zero API cost
+make test                # 1115 tests, offline, zero API cost
 make dev                 # api on http://localhost:8000
 ```
 
@@ -170,6 +185,11 @@ curl localhost:8000/readyz
 `/readyz` reports datastore reachability **and which provider adapters are wired**, so a
 demo-day misconfiguration (mock TTS still selected) is one request away rather than a
 surprise on stage.
+
+Three pages: `/` is the call simulator, `/dashboard` is the control room, and
+`/api/calls/{id}/evidence.html` is a call's evidence pack. The PDF version needs
+`pip install -e '.[pdf]'` plus its system libraries (`brew install pango` on macOS); without
+them the route answers 503 and says so, and the HTML pack needs neither.
 
 ### Commands
 

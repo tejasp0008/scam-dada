@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scam Dada — control room</title>
+<style>
+  :root {
+    --bg:#0e1014; --panel:#161920; --panel2:#1c2029; --line:#262b36; --text:#e8eaf0;
+    --muted:#8b93a7; --accent:#6ea8fe; --caller:#ffb86b; --persona:#7ee787;
+    --danger:#ff7b72; --warn:#f0c674;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:14px/1.5 ui-sans-serif,system-ui,-apple-system,sans-serif; }
+  header { padding:14px 20px; border-bottom:1px solid var(--line); display:flex;
+           align-items:baseline; gap:14px; flex-wrap:wrap; }
+  h1 { font-size:16px; margin:0; font-weight:650; }
+  .muted { color:var(--muted); font-size:13px; }
+  .layout { display:grid; grid-template-columns:320px 1fr; min-height:calc(100vh - 53px); }
+  .calls { border-right:1px solid var(--line); overflow-y:auto; max-height:calc(100vh - 53px); }
+  .call { padding:12px 16px; border-bottom:1px solid var(--line); cursor:pointer; }
+  .call:hover { background:var(--panel); }
+  .call.active { background:var(--panel2); border-left:3px solid var(--accent); }
+  .call .id { font-weight:600; font-variant-numeric:tabular-nums; }
+  .call .meta { color:var(--muted); font-size:12px; margin-top:2px; }
+  .live { color:var(--persona); }
+  .detail { padding:18px 20px; overflow-y:auto; max-height:calc(100vh - 53px); }
+  .tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px;
+           margin-bottom:16px; }
+  .tile { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+          padding:12px 14px; }
+  .tile .label { font-size:11px; text-transform:uppercase; letter-spacing:.07em;
+                 color:var(--muted); }
+  .tile .value { font-size:24px; font-weight:650; font-variant-numeric:tabular-nums;
+                 margin-top:4px; }
+  .panels { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  @media (max-width:980px) { .layout { grid-template-columns:1fr; } .panels { grid-template-columns:1fr; } }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+           padding:14px 16px; }
+  .panel h2 { font-size:11px; text-transform:uppercase; letter-spacing:.07em;
+              color:var(--muted); margin:0 0 10px; }
+  .scroll { max-height:40vh; overflow-y:auto; }
+  .turn { margin-bottom:9px; }
+  .who { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
+  .caller .who { color:var(--caller); }
+  .persona .who { color:var(--persona); }
+  table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; }
+  td,th { padding:3px 0; text-align:left; }
+  th { font-size:10px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); }
+  td:last-child,th:last-child { text-align:right; }
+  .meter { height:7px; background:var(--line); border-radius:4px; overflow:hidden; margin-top:6px; }
+  .meter > i { display:block; height:100%; width:0; transition:width .25s ease; }
+  .stages { display:flex; gap:4px; margin-top:8px; }
+  .stage { flex:1; text-align:center; font-size:10px; padding:5px 2px; border-radius:5px;
+           background:var(--line); color:var(--muted); text-transform:uppercase;
+           letter-spacing:.04em; }
+  .stage.on { background:var(--accent); color:#0b1020; font-weight:650; }
+  .stage.on.final { background:var(--danger); color:#1a0b0b; }
+  .leak { border:1px solid var(--danger); background:#2a1412; border-radius:8px;
+          padding:10px 12px; margin-bottom:8px; }
+  .leak .who { color:var(--danger); }
+  a.button { display:inline-block; font-size:12px; font-weight:600; padding:6px 12px;
+             border:1px solid var(--line); border-radius:7px; color:var(--text);
+             text-decoration:none; margin-right:8px; }
+  a.button:hover { border-color:var(--accent); color:var(--accent); }
+  .empty { color:var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Scam Dada</h1>
+  <span class="muted">control room</span>
+  <span class="muted" id="conn">not watching</span>
+  <span class="muted" id="clock"></span>
+</header>
+
+<div class="layout">
+  <div class="calls" id="calls"><div class="call empty">Loading calls…</div></div>
+
+  <div class="detail" id="detail">
+    <p class="empty">Pick a call on the left. New calls appear automatically.</p>
+  </div>
+</div>
+
+<template id="detail-template">
+  <div class="tiles">
+    <div class="tile"><div class="label">Time wasted</div><div class="value" id="t-wasted">—</div></div>
+    <div class="tile"><div class="label">Caller turns</div><div class="value" id="t-caller">—</div></div>
+    <div class="tile"><div class="label">Identifiers</div><div class="value" id="t-entities">—</div></div>
+    <div class="tile"><div class="label">Leaks</div><div class="value" id="t-leaks">—</div></div>
+    <div class="tile"><div class="label">Personas</div><div class="value" id="t-personas">—</div></div>
+  </div>
+
+  <div class="panel" style="margin-bottom:14px">
+    <h2>Scam stage</h2>
+    <div class="stages" id="stages"></div>
+    <table style="margin-top:12px">
+      <tr><td>Pressure applied</td><td id="d-pressure">—</td></tr>
+    </table>
+    <div class="meter"><i id="bar-pressure" style="background:var(--warn)"></i></div>
+    <table style="margin-top:10px">
+      <tr><td>Hang-up risk</td><td id="d-risk">—</td></tr>
+    </table>
+    <div class="meter"><i id="bar-risk" style="background:var(--danger)"></i></div>
+    <p class="muted" id="d-signals" style="margin:8px 0 0"></p>
+    <p class="muted" id="d-tactic" style="margin:4px 0 0"></p>
+  </div>
+
+  <div class="panel" id="leak-panel" hidden style="margin-bottom:14px">
+    <h2>Identity leak</h2>
+    <div id="leaks"></div>
+  </div>
+
+  <div class="panels">
+    <div class="panel">
+      <h2>Transcript</h2>
+      <div class="scroll" id="transcript"><p class="empty">Nothing yet.</p></div>
+    </div>
+    <div>
+      <div class="panel" style="margin-bottom:14px">
+        <h2>Extracted intelligence</h2>
+        <div class="scroll" id="entities"><p class="empty">Nothing yet.</p></div>
+      </div>
+      <div class="panel" style="margin-bottom:14px">
+        <h2>Latency, last turn</h2>
+        <table>
+          <tr><td>End of speech → transcript</td><td id="l-stt">—</td></tr>
+          <tr><td>Reply first token</td><td id="l-llm">—</td></tr>
+          <tr><td>Synthesis first audio</td><td id="l-tts">—</td></tr>
+          <tr><td>Filler played</td><td id="l-filler">—</td></tr>
+        </table>
+      </div>
+      <div class="panel">
+        <h2>Evidence pack</h2>
+        <a class="button" id="link-html" target="_blank" rel="noopener">View HTML</a>
+        <a class="button" id="link-pdf">Download PDF</a>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script>
+const STAGES = ["hook", "authority", "fear", "isolation", "payment"];
+const ENTITY_LABELS = {
+  upi_id: "UPI handle", phone: "Phone", ifsc: "IFSC", amount: "Amount",
+  officer_name: "Claimed name", organisation: "Claimed organisation",
+  case_number: "Case number",
+};
+
+let socket = null;
+let watching = null;
+let seenEntities = new Set();
+let lastSeq = -1;
+
+const el = (id) => document.getElementById(id);
+
+async function loadCalls() {
+  let calls = [];
+  try {
+    calls = await (await fetch("/api/calls?limit=50")).json();
+  } catch (err) {
+    el("calls").innerHTML = '<div class="call empty">Could not load calls.</div>';
+    return;
+  }
+  if (!calls.length) {
+    el("calls").innerHTML =
+      '<div class="call empty">No calls yet. Open the simulator and start one.</div>';
+    return;
+  }
+  el("calls").innerHTML = "";
+  for (const call of calls) {
+    const row = document.createElement("div");
+    row.className = "call" + (call.call_id === watching ? " active" : "");
+    const live = call.ended_at === null;
+    row.innerHTML =
+      `<div class="id">${call.call_id.slice(0, 8)}` +
+      (live ? ' <span class="live">● live</span>' : "") +
+      `</div><div class="meta">` +
+      `${new Date(call.started_at).toLocaleTimeString()} · ` +
+      `${call.seconds_wasted.toFixed(0)}s wasted · ` +
+      `${call.stage_reached || "no stage"}` +
+      (call.leak_count ? ` · <span style="color:var(--danger)">${call.leak_count} leak</span>` : "") +
+      `</div>`;
+    row.onclick = () => watch(call.call_id);
+    el("calls").append(row);
+  }
+}
+
+function renderShell(callId) {
+  const detail = el("detail");
+  detail.innerHTML = "";
+  detail.append(el("detail-template").content.cloneNode(true));
+  el("link-html").href = `/api/calls/${callId}/evidence.html`;
+  el("link-pdf").href = `/api/calls/${callId}/evidence.pdf`;
+
+  const stages = el("stages");
+  for (const stage of STAGES) {
+    const chip = document.createElement("div");
+    chip.className = "stage";
+    chip.id = `stage-${stage}`;
+    chip.textContent = stage;
+    stages.append(chip);
+  }
+}
+
+async function watch(callId) {
+  watching = callId;
+  seenEntities = new Set();
+  lastSeq = -1;
+  renderShell(callId);
+  await loadCalls();
+
+  // The report first, so a finished call renders fully rather than waiting for a feed that
+  // will never publish anything again.
+  try {
+    const report = await (await fetch(`/api/calls/${callId}`)).json();
+    applyReport(report);
+  } catch (err) {
+    /* a live call with nothing persisted yet is normal */
+  }
+
+  if (socket) socket.close();
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  socket = new WebSocket(`${proto}://${location.host}/ws/dashboard/${callId}?after_seq=${lastSeq}`);
+  socket.onopen = () => (el("conn").textContent = `watching ${callId.slice(0, 8)}`);
+  socket.onclose = () => (el("conn").textContent = "feed closed");
+  socket.onmessage = (event) => {
+    const payload = JSON.parse(event.data);
+    if (payload.seq <= lastSeq) return;
+    lastSeq = payload.seq;
+    applyEvent(payload);
+  };
+}
+
+function applyReport(report) {
+  const s = report.summary;
+  el("t-wasted").textContent = `${s.seconds_wasted.toFixed(0)}s`;
+  el("t-caller").textContent = s.caller_turns;
+  el("t-entities").textContent = s.entity_count;
+  el("t-leaks").textContent = s.leak_count;
+  el("t-personas").textContent = (s.personas || []).length || "—";
+  setStage(s.stage_reached);
+  setMeter("pressure", s.peak_pressure);
+  setMeter("risk", s.peak_hangup_risk);
+
+  for (const turn of report.turns) {
+    addTurn(turn.persona ? "persona" : "caller", turn.persona || turn.speaker, turn.text);
+  }
+  for (const entity of report.entities) addEntity(entity);
+  for (const leak of report.leaks) addLeak(leak);
+  if (report.latency) {
+    for (const leg of report.latency) {
+      const target = { stt_final_ms: "l-stt", llm_first_token_ms: "l-llm", tts_first_byte_ms: "l-tts" }[leg.name];
+      if (target) {
+        // Median across the call, not the last turn, because a finished call has no
+        // "last turn" worth singling out.
+        el(target).textContent = leg.median_ms === null ? "not measurable" : `${leg.median_ms} ms median`;
+      }
+    }
+  }
+}
+
+function applyEvent(event) {
+  if (event.type === "transcript") {
+    addTurn(event.persona ? "persona" : "caller", event.persona || "caller", event.text);
+  } else if (event.type === "stage") {
+    setStage(event.stage);
+    setMeter("pressure", event.pressure_score);
+  } else if (event.type === "risk") {
+    setMeter("risk", event.hangup_risk);
+    el("d-signals").textContent = (event.signals || []).length
+      ? "Signals: " + event.signals.join(", ") : "";
+    el("d-tactic").textContent = event.tactic ? "Retention tactic: " + event.tactic : "";
+  } else if (event.type === "entity") {
+    addEntity(event);
+    el("t-entities").textContent = seenEntities.size;
+  } else if (event.type === "canary_match") {
+    addLeak(event);
+  } else if (event.type === "latency") {
+    el("l-stt").textContent = event.stt_final_ms === null ? "not measurable" : `${event.stt_final_ms} ms`;
+    el("l-llm").textContent = event.llm_first_token_ms === null ? "—" : `${event.llm_first_token_ms} ms`;
+    el("l-tts").textContent = event.tts_first_byte_ms === null ? "—" : `${event.tts_first_byte_ms} ms`;
+    el("l-filler").textContent = event.filler_played ? "yes" : "no";
+  } else if (event.type === "persona_handoff") {
+    addTurn("persona", "handoff",
+      `${event.from_persona} hands the phone to ${event.to_persona} — ${event.reason}`);
+  }
+}
+
+function setStage(stage) {
+  if (!stage) return;
+  const reached = STAGES.indexOf(stage);
+  STAGES.forEach((name, index) => {
+    const chip = el(`stage-${name}`);
+    if (!chip) return;
+    chip.className = "stage" + (index <= reached ? " on" : "") + (name === "payment" ? " final" : "");
+  });
+}
+
+function setMeter(name, value) {
+  if (typeof value !== "number") return;
+  el(`d-${name}`).textContent = Math.round(value * 100) + "%";
+  el(`bar-${name}`).style.width = Math.round(value * 100) + "%";
+}
+
+function addTurn(cls, who, text) {
+  const box = el("transcript");
+  if (!box) return;
+  if (box.querySelector(".empty")) box.innerHTML = "";
+  const div = document.createElement("div");
+  div.className = "turn " + cls;
+  const label = document.createElement("div");
+  label.className = "who";
+  label.textContent = who;
+  const body = document.createElement("div");
+  body.textContent = text;
+  div.append(label, body);
+  box.append(div);
+  box.scrollTop = box.scrollHeight;
+}
+
+function addEntity(entity) {
+  const key = `${entity.entity_type}:${entity.value}`;
+  if (seenEntities.has(key)) return;
+  seenEntities.add(key);
+  const box = el("entities");
+  if (!box) return;
+  if (box.querySelector(".empty")) box.innerHTML = "";
+  const div = document.createElement("div");
+  div.className = "turn";
+  const label = document.createElement("div");
+  label.className = "who";
+  // Which machine found it, because the evidence pack has to say and so should this.
+  label.textContent = `${ENTITY_LABELS[entity.entity_type] || entity.entity_type} · ${entity.source}`
+    + (entity.source === "llm" ? ` · ${Math.round(entity.confidence * 100)}%` : "");
+  const value = document.createElement("div");
+  value.textContent = entity.value;
+  div.append(label, value);
+  box.append(div);
+}
+
+function addLeak(leak) {
+  const panel = el("leak-panel");
+  if (!panel) return;
+  panel.hidden = false;
+  const div = document.createElement("div");
+  div.className = "leak";
+  const label = document.createElement("div");
+  label.className = "who";
+  label.textContent = `${leak.matched_field} · ${Math.round(leak.score * 100)}% · issued to call ${leak.issued_call_id.slice(0, 8)}`;
+  const body = document.createElement("div");
+  body.textContent = `"${leak.matched_text}" was given to an earlier call and this caller just said it.`;
+  div.append(label, body);
+  el("leaks").append(div);
+  el("t-leaks").textContent = el("leaks").children.length;
+}
+
+function tick() {
+  el("clock").textContent = new Date().toLocaleTimeString();
+}
+
+loadCalls();
+setInterval(loadCalls, 4000);
+setInterval(tick, 1000);
+tick();
+</script>
+</body>
+</html>

@@ -842,3 +842,60 @@ that mentioned this handle", and neither is a reasonable question to ask of a JS
 **A note on test environments.** SQLite does not enforce foreign keys unless asked, so a test
 that provokes a write failure with one passes here for the wrong reason and proves nothing
 about Postgres. The recorder's failure test injects the failure instead.
+
+## 0026 — Phase 4: the control room and the evidence pack
+*2026-11-06 · Phase 4*
+
+**One set of numbers, three readers.** The dashboard, the REST API and the evidence pack all
+render the same `CallReport`, built by the same code. A dashboard that disagreed with the PDF
+it generated would be worse than either on its own.
+
+**The summary is recomputed, not read from a column.** `calls` does carry
+`scammer_seconds_wasted`, written at hang-up, but a live call has not been written yet and a
+crashed one never will be. Recomputing from turns and events means the figure is the same for
+a call in progress, a finished call and a call whose process died — and is always derivable
+from the evidence rather than from a field somebody remembered to set.
+
+**The arithmetic is in `app/core/report.py`, not in SQL.** "No hardcoded results" means a
+number has to come from a real run; it also has to be reproducible *from that run's data*. So
+`seconds_wasted`, the percentiles and the turn counts are pure functions a test calls
+directly. `seconds_wasted` spans the whole call rather than summing turn durations, because
+the silences between turns are the scammer's time too and they are most of what a stalling
+persona produces.
+
+**A field that can only be zero was removed.** `CallSummary` had `barge_ins`, and nothing
+populated it: barge-in happens, is logged, and is visible live in the simulator, but it is
+not an event and not a column. Always-zero reads as "never happened" rather than "not
+measured", which is exactly the kind of number the honesty rule exists to prevent. Emitting a
+barge-in event is the right fix and is not done. A test asserts the field is absent.
+
+**Unmeasured latency legs are reported, not omitted.** A leg missing from the table reads as
+fast; a leg with `samples: 0` and no numbers reads as never measured, which is the truth —
+`stt_final_ms` is often unmeasurable because Prisma's own VAD can beat our hysteresis
+(DECISIONS 0024). The pack says so in words underneath the table.
+
+**Percentiles are nearest-rank, not interpolated.** With the handful of turns a demo call
+produces, an interpolated p95 invents a number that no turn actually took.
+
+**The evidence pack is HTML first, PDF from the same HTML.** Two reasons rather than one: the
+HTML needs nothing installed, so a machine that cannot render a PDF still produces the pack;
+and a PDF rendered from the page the operator already looked at cannot disagree with it.
+
+**Autoescaping in that template is load-bearing, not hygiene.** Every string in a report came
+out of a stranger's mouth by way of a transcriber, and the pack is a document people forward.
+Unescaped transcript text would be a stored injection in the one artefact meant to be passed
+around. The API test seeds a turn containing `<script>` and asserts it comes out escaped.
+
+**WeasyPrint fails with `OSError`, not `ImportError`.** Found by installing it: with the
+package present but Pango absent the import raises
+`OSError: cannot load library 'libgobject-2.0-0'`, which a handler catching only
+`ImportError` turns into a 500 instead of an explanation. The route now answers 503 with the
+two things an operator needs — the extra to install and the system library behind it — and
+points at the HTML pack, which needs neither. `brew install pango` makes the PDF work on
+macOS; verified, 17 KB, text confirmed present in the rendered output.
+
+**Verified on real recorded calls**, not fixtures: 49 s wasted across six caller turns and
+six persona turns, both personas, stage timeline `authority → fear → payment`, peak pressure
+0.85, six identifiers with their provenance, and one identity leak attributed back to the
+call that issued it. Latency over six turns: transcript median 519 ms, first token 273 ms
+(p95 1394), first audio 472 ms.
