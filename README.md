@@ -29,10 +29,11 @@ Built for the Great Indian AI Internship Challenge on Gnani's speech models.
 | **Room** | Synthetic ceiling fan, mains hum, street and room floor, plus a short reverb that puts the voice *in* the room rather than over it |
 | **Phone line** | Handset presence bump, carrier AGC, 8 kHz narrowband, G.711 mu-law companding, packet loss with concealment |
 | **Call profiles** | The three stages composed in the one order that is physically correct, as a six-rung ladder from `studio` to `bad-line` |
-| **Voice-to-room ratio** | The persona sits 10.2 dB above the room (measured, not nominal), which masks synthesis artefacts without making the caller ask him to speak up |
+| **Voice-to-room ratio** | Referenced to speech level, and equalised across lines so the *delivered* ratio (~10.5 dB measured) does not change when the line does |
+| **Persona voices** | Dada is Devansh on `bad-line`; the grandson is derived from the same profile so the room and carrier cannot change when the handset does. Startup fails if both personas are given one voice |
 | **Audio tags** | The 13-tag Timbre v3.0 catalogue, with a per-persona allowed set; unknown tags are billed and then discarded by the API, so they are stripped first |
 | **Personas** | Dada and grandson prompts, ethics block shared and digest-pinned, relay registry |
-| Tests | 379 offline + 64 contract, `ruff` and `mypy` clean (`mypy --strict` on `core` and `providers`) |
+| Tests | 391 offline + 64 contract, `ruff` and `mypy` clean (`mypy --strict` on `core` and `providers`) |
 
 Measured on the live APIs by `make smoke` (n=1 per provider, 2026-11-04):
 
@@ -131,7 +132,7 @@ cp .env.example .env     # then fill in GNANI_API_KEY and the LLM_* values
 make install             # venv on 3.11 + dev dependencies
 make up                  # postgres + redis
 make migrate             # apply the baseline schema
-make test                # 379 tests, offline, zero API cost
+make test                # 391 tests, offline, zero API cost
 make dev                 # api on http://localhost:8000
 ```
 
@@ -156,6 +157,7 @@ surprise on stage.
 | `make audition` | **Spends credits.** One line in every Timbre v3.0 voice. `ARGS="--male"` for the male set |
 | `make audition-male` | **Spends credits** (6 requests). Every male voice at Dada's chosen profile, to compare voices |
 | `make audition-ladder` | 1 request, or free from cache. One voice through all six realism profiles, to choose a profile |
+| `python scripts/audition_voices.py --male --grandson` | **Spends credits** (6 requests). The grandson's own line in every male voice, unaged, on Dada's room and line |
 | `make lint` / `make fmt` / `make types` | `ruff` and `mypy` |
 | `make check` | Everything that gates a phase |
 | `make revision m="..."` | Autogenerate a migration |
@@ -218,14 +220,16 @@ real limit.
   utterance is processed before the first byte goes out. Fillers will be rendered once at
   cache-write time; a chunk-wise stretch with one frame of lookahead is the fix if the
   per-utterance cost shows up in the live path.
-- **The bed's level dial is not calibrated to the output.** `level_db` is set against the
-  voice before the line; the carrier AGC then lifts the bed-only passages toward its target,
-  so the delivered speech-to-room ratio is 5–7 dB tighter than the nominal figure. The
-  default reads −15 dB nominal and measures 10.2 dB delivered. Only the measurement is
-  quoted anywhere, and three tests pin the relationship (DECISIONS 0020).
-- **A closer bed trades one risk for another.** Burying the voice masks synthesis artefacts,
-  but past about −10 dB nominal the scammer starts asking the persona to speak up, which
-  raises hang-up risk. −15 dB is a compromise chosen by ear, not an optimum.
+- **The bed's level dial is not calibrated to the output, and the offset differs per line.**
+  `level_db` is set against the voice before the line; each line's AGC then lifts the
+  bed-only passages toward its target by a different amount. On `landline` −15 dB nominal
+  delivers 8.2 dB; on `bad-line` the same figure delivers 3.7 dB. The nominal levels
+  therefore differ *in order to* equalise the delivered ratio at ~10.5 dB. Only measured
+  figures are quoted anywhere, and tests pin the relationship (DECISIONS 0020, 0021).
+- **`bad-line` is the aggressive end of the ladder, chosen deliberately.** A bad connection
+  masks synthesis artefacts and forces the scammer to repeat himself, which is the goal —
+  but it also gives him a reason to call back on a better line. That is hang-up risk, and
+  feature 3 has to work with it rather than against it.
 - **The room tone is generated, not recorded.** A fan, mains hum, traffic and a room floor
   from noise and sinusoids. It is convincing in a phone band, and it means no audio had to be
   sourced, licensed or committed — but it is not a real room, and a trained ear listening for

@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from app.core.audio.call_profile import PROFILES_BY_NAME
 from app.core.models import PersonaId
@@ -24,6 +25,7 @@ from app.core.personas import (
     profile_for,
 )
 from app.core.tags import TIMBRE_V3_TAGS
+from app.infra.settings import Settings
 
 PROMPT_DIR = Path(__file__).resolve().parents[2] / "app" / "prompts"
 
@@ -153,3 +155,33 @@ class TestPromptHygiene:
         assert not re.search(r"\b\d{4}\s?\d{4}\s?\d{4}\b", text), "looks like an Aadhaar number"
         assert not re.search(r"\b[A-Z]{5}\d{4}[A-Z]\b", text), "looks like a PAN"
         assert not re.search(r"\b[\w.]+@(?!demo\b)(ok\w+|paytm|ybl|upi|axl)\b", text), "live UPI"
+
+
+class TestVoiceConfiguration:
+    """The two personas must not share a voice. Checked at startup, not at demo time."""
+
+    @staticmethod
+    def _settings(elder: str, grandson: str) -> Settings:
+        return Settings(
+            _env_file=None,  # type: ignore[call-arg]
+            persona_elder_voice=elder,
+            persona_grandson_voice=grandson,
+        )
+
+    def test_two_different_voices_are_accepted(self) -> None:
+        settings = self._settings("Devansh", "Prakash")
+        assert settings.persona_elder_voice == "Devansh"
+
+    def test_the_same_voice_twice_is_refused(self) -> None:
+        with pytest.raises(ValidationError, match="two different voices"):
+            self._settings("Devansh", "Devansh")
+
+    def test_the_check_ignores_case_and_padding(self) -> None:
+        """Because `.env` is hand-edited and ' Devansh' is the same voice as 'devansh'."""
+        with pytest.raises(ValidationError, match="two different voices"):
+            self._settings("Devansh", " devansh ")
+
+    def test_an_unset_voice_does_not_trip_the_check(self) -> None:
+        """Voices are chosen by ear over several sessions, so half-configured is normal."""
+        assert self._settings("Devansh", "").persona_grandson_voice == ""
+        assert self._settings("", "").persona_elder_voice == ""

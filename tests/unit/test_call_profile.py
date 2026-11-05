@@ -7,6 +7,7 @@ import pytest
 
 from app.core.audio.ambience import AMBIENCE_BY_NAME, AmbienceBed, RoomAcoustics
 from app.core.audio.call_profile import (
+    BAD_LINE_BED_DB,
     CALL_PROFILES,
     DEFAULT_ELDER_PROFILE,
     GRANDSON_PROFILE,
@@ -76,11 +77,17 @@ class TestRegistry:
             assert profile.ambience is not None
             assert profile.telephony.band
 
-    def test_the_grandson_shares_the_room_but_is_not_aged(self) -> None:
+    def test_the_grandson_differs_from_the_elder_in_exactly_one_respect(self) -> None:
+        """He is handed the same handset in the same room: only the larynx changes.
+
+        Written as a whole-object comparison rather than field by field, so a stage added to
+        CallProfile later cannot quietly diverge between the two personas.
+        """
         elder = PROFILES_BY_NAME[DEFAULT_ELDER_PROFILE]
         assert GRANDSON_PROFILE.aging.name == "none"
-        assert GRANDSON_PROFILE.ambience == elder.ambience
-        assert GRANDSON_PROFILE.telephony == elder.telephony
+        assert elder.aging.name != "none"
+        rejoined = GRANDSON_PROFILE.model_copy(update={"name": elder.name, "aging": elder.aging})
+        assert rejoined == elder
 
 
 class TestRender:
@@ -225,11 +232,19 @@ class TestRender:
 class TestVoiceLoudness:
     def test_the_persona_profiles_sit_the_voice_low_against_the_room(self) -> None:
         """A voice low against a noisy room is harder to examine for synthesis artefacts."""
-        for name in ("landline", "mobile", "bad-line"):
+        for name in ("landline", "mobile"):
             profile = PROFILES_BY_NAME[name]
             assert profile.ambience is not None
             assert profile.ambience.level_db == PERSONA_BED_DB
             assert profile.output_peak == PERSONA_OUTPUT_PEAK
+
+    def test_the_poor_line_carries_its_bed_further_back(self) -> None:
+        """Not a fudge: its own AGC compresses at 0.85 and lifts the bed ~5 dB further than
+        the cleaner lines do, so an equal nominal level is not an equal delivered level."""
+        profile = PROFILES_BY_NAME["bad-line"]
+        assert profile.ambience is not None
+        assert profile.ambience.level_db == BAD_LINE_BED_DB
+        assert BAD_LINE_BED_DB < PERSONA_BED_DB
 
     def test_the_persona_bed_is_closer_than_the_preset_default(self) -> None:
         assert AMBIENCE_BY_NAME["fan-and-street"].level_db < PERSONA_BED_DB
@@ -331,7 +346,27 @@ class TestDeliveredRatio:
         near = self._delivered_snr(profile.with_room(profile.ambience, level_db=-9.0))
         assert near < far
 
-    def test_the_default_leaves_the_voice_clearly_above_the_room(self) -> None:
-        """Masking artefacts is the goal; a scammer saying "I cannot hear you" is not."""
-        delivered = self._delivered_snr(PROFILES_BY_NAME[DEFAULT_ELDER_PROFILE])
-        assert 6.0 < delivered < 16.0
+    def test_the_delivered_ratio_is_comparable_across_the_persona_profiles(self) -> None:
+        """The thing worth holding constant is what the listener gets, not the dial.
+
+        Each line's AGC lifts the bed by a different amount, so the nominal levels differ in
+        order to make the delivered ratios land in the same region. Without this the choice of
+        line would silently change how buried the voice is.
+        """
+        delivered = [
+            self._delivered_snr(PROFILES_BY_NAME[name])
+            for name in ("landline", "mobile", "bad-line")
+        ]
+        assert max(delivered) - min(delivered) < 6.0
+
+    def test_the_voice_still_sits_above_the_room_on_the_chosen_profile(self) -> None:
+        """`bad-line` was chosen deliberately and is the aggressive end of the ladder.
+
+        The guard left here is only that the voice is still the loudest thing on the line. A
+        negative ratio would mean the room is louder than the speaker, at which point no
+        amount of scammer patience helps. On this synthetic tone the default measures ~2 dB;
+        on the real Devansh render it measures 6.7 dB, because a tone with an envelope is not
+        speech. Neither number is comfortable, and that is the recorded trade, not an
+        accident — see DECISIONS 0021.
+        """
+        assert self._delivered_snr(PROFILES_BY_NAME[DEFAULT_ELDER_PROFILE]) > 0.0

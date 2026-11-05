@@ -16,6 +16,7 @@ from app.core.audio.ambience import (
     mains_hum,
     room_floor,
     room_reverb,
+    speech_rms,
     street,
 )
 
@@ -210,3 +211,51 @@ class TestRoomAcoustics:
     def test_a_room_longer_than_a_hall_is_refused(self) -> None:
         with pytest.raises(ValueError):
             RoomAcoustics(reverb_ms=5000.0)
+
+
+class TestSpeechReferencedLevel:
+    """The bed is referenced to the speaking frames, not to the whole clip.
+
+    Whole-clip RMS tracks how much silence a line contains, so the same nominal level
+    produced delivered ratios from 1.1 dB to 6.3 dB across six voices reading one line. The
+    dial has to mean one thing or choosing a level by ear is pointless.
+    """
+
+    @staticmethod
+    def _with_silence(speech_seconds: float, silence_seconds: float) -> np.ndarray:
+        speech = voice(speech_seconds)
+        gap = np.zeros(int(silence_seconds * RATE), dtype=np.float32)
+        return np.concatenate([speech, gap, speech]).astype(np.float32)
+
+    def test_speech_rms_ignores_the_gaps(self) -> None:
+        talkative = self._with_silence(1.0, 0.1)
+        hesitant = self._with_silence(1.0, 3.0)
+        assert speech_rms(talkative, RATE) == pytest.approx(speech_rms(hesitant, RATE), rel=0.05)
+        # Whole-clip RMS, by contrast, differs a lot - which was the bug.
+        assert rms(hesitant) < rms(talkative) * 0.8
+
+    def test_the_delivered_level_no_longer_depends_on_how_much_the_voice_pauses(self) -> None:
+        bed = AmbienceBed(AMBIENCE_BY_NAME["ceiling-fan"], RATE)
+        levels = []
+        for silence in (0.1, 1.0, 3.0):
+            source = self._with_silence(1.0, silence)
+            added = bed.mix_into(source, level_db=-15.0) - source
+            levels.append(rms(added) / speech_rms(source, RATE))
+        assert max(levels) / min(levels) < 1.1
+
+    def test_the_level_is_still_honoured_against_the_speech(self) -> None:
+        bed = AmbienceBed(AMBIENCE_BY_NAME["quiet-room"], RATE)
+        source = self._with_silence(1.0, 1.0)
+        added = bed.mix_into(source, level_db=-18.0) - source
+        delivered = 20 * np.log10(rms(added) / speech_rms(source, RATE))
+        assert delivered == pytest.approx(-18.0, abs=0.5)
+
+    def test_a_clip_shorter_than_two_windows_falls_back_to_plain_rms(self) -> None:
+        short = voice(0.01)
+        assert speech_rms(short, RATE) == pytest.approx(rms(short), rel=1e-6)
+
+    def test_silence_has_no_speech_level(self) -> None:
+        assert speech_rms(np.zeros(RATE, dtype=np.float32), RATE) == 0.0
+
+    def test_an_empty_signal_has_no_speech_level(self) -> None:
+        assert speech_rms(np.zeros(0, dtype=np.float32), RATE) == 0.0

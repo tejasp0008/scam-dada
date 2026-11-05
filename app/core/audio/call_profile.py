@@ -178,6 +178,23 @@ def _ambience(name: str, *, level_db: float | None = None) -> AmbiencePreset:
 #: cannot hear you", which raises hang-up risk rather than lowering suspicion.
 PERSONA_BED_DB = -15.0
 
+#: `bad-line` needs its bed further back than the cleaner profiles, which is not a fudge but
+#: a consequence of its own AGC. `mobile-poor` compresses at 0.85, and a compressor lifts the
+#: bed-only passages toward its target, so the same nominal level arrives far tighter:
+#:
+#: | nominal | delivered on `landline` | delivered on `bad-line` |
+#: |---|---|---|
+#: | -15 dB | 8.2 dB | 3.7 dB |
+#: | -18 dB | — | 6.5 dB |
+#: | -22 dB | — | 10.5 dB |
+#:
+#: At 3.7 dB the voice is genuinely hard work to follow, and `bad-line` already masks heavily
+#: through 2% packet loss, hard compression and mu-law quantisation — the bed does not need to
+#: do that job a second time. -22 dB nominal puts it at 10.5 dB delivered, level with the
+#: cleaner profiles. Equalising the *delivered* ratio is the thing worth holding constant;
+#: the nominal number is an implementation detail of whichever line it is on.
+BAD_LINE_BED_DB = -22.0
+
 #: A quiet talker. Mostly cosmetic for the reason in `output_peak`'s description, but it also
 #: leaves headroom so the room tone is never the thing that clips.
 PERSONA_OUTPUT_PEAK = 0.62
@@ -219,26 +236,32 @@ CALL_PROFILES: tuple[CallProfile, ...] = (
         aging=_aging("frail"),
         telephony=_line("mobile-poor"),
         acoustics=RoomAcoustics(reverb_ms=340.0, mix=0.2),
-        ambience=_ambience("fan-and-street", level_db=PERSONA_BED_DB),
+        ambience=_ambience("fan-and-street", level_db=BAD_LINE_BED_DB),
         output_peak=PERSONA_OUTPUT_PEAK,
     ),
 )
 
-#: What Dada sounds like unless something says otherwise. Chosen by ear: the landline
-#: channel, in a room with a fan and a street outside.
-DEFAULT_ELDER_PROFILE = "landline"
+#: What Dada sounds like unless something says otherwise. Chosen by ear: the frail voice on
+#: a poor mobile connection, in a room with a fan and a street outside.
+#:
+#: This is the aggressive end of the ladder and the trade is deliberate. A bad line masks
+#: synthesis artefacts and forces the scammer to repeat himself, which is the entire point of
+#: a scambait — but it also gives him a reason to say he will call back on a better line. See
+#: DECISIONS 0021.
+DEFAULT_ELDER_PROFILE = "bad-line"
 
-#: The grandson is 27 and in the same room, so he shares the room and the line but is not
-#: aged. He is not part of the ladder above — that exists to be listened through in order —
-#: but he is addressable by name like any other profile.
-GRANDSON_PROFILE = CallProfile(
-    name="grandson",
-    aging=_aging("none"),
-    telephony=_line("landline"),
-    acoustics=RoomAcoustics(),
-    ambience=_ambience("fan-and-street", level_db=PERSONA_BED_DB),
-    output_peak=PERSONA_OUTPUT_PEAK,
-)
+_ELDER = {profile.name: profile for profile in CALL_PROFILES}[DEFAULT_ELDER_PROFILE]
+
+#: The grandson is 27, so he is not aged — but he is standing in the same room and he is
+#: holding the same handset, and neither the room nor the carrier can change when a phone is
+#: passed from one hand to another.
+#:
+#: Derived from the elder's profile rather than written out, so the two cannot drift apart.
+#: Spelling it out separately is how the grandson ended up on a landline while Dada was on a
+#: poor mobile connection: the handoff would have audibly changed the line quality, which is
+#: a tell in the one moment of the call that is meant to be seamless. A test now pins that the
+#: only difference between them is the ageing.
+GRANDSON_PROFILE = _ELDER.model_copy(update={"name": "grandson", "aging": _aging("none")})
 
 PROFILES_BY_NAME: dict[str, CallProfile] = {
     profile.name: profile for profile in (*CALL_PROFILES, GRANDSON_PROFILE)

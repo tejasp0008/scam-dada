@@ -561,3 +561,57 @@ headphones for the demo recording, noted rather than engineered around.
 **Also fixed here:** bed generation is now decoupled from bed level. `AmbiencePreset.
 generator_key()` excludes `level_db` and `AmbienceBed.mix_into` takes the level as an
 argument, so an eleven-clip level sweep builds one 12-second loop instead of eleven.
+
+## 0021 — Dada is Devansh on a bad line, and three bugs that choice exposed
+*2026-11-05 · Phase 1.5*
+
+Chosen by ear: **Devansh**, `bad-line` — the `frail` voice on `mobile-poor`, in a room with a
+fan and a street. It is the aggressive end of the ladder and the trade is worth stating: a bad
+line masks synthesis artefacts *and* forces the scammer to repeat himself, which is the entire
+point of a scambait, but it also hands him a reason to say he will call back on a better line.
+Hang-up risk is feature 3's problem; this is the input it has to work with.
+
+Switching the default surfaced three things, two of them bugs that would have reached the demo.
+
+**1. The grandson was on a different carrier.** `GRANDSON_PROFILE` was written out separately
+and happened to say `landline` while Dada moved to `mobile-poor`. The two personas are in one
+room passing one handset — neither the room nor the carrier can change when a phone changes
+hands, and a connection that audibly improves mid-call is a tell in the one moment that is
+meant to be seamless. The grandson is now *derived* from the elder's profile
+(`_ELDER.model_copy(update={"aging": ...})`), so the only thing that can differ is the larynx,
+and a test compares the whole object rather than field by field so a stage added later cannot
+diverge either. `test_both_personas_are_in_the_same_room_on_the_same_line` caught this the
+moment the default changed, which is the entire reason it exists.
+
+**2. The bed level meant something different for every voice.** It was referenced to the
+voice's overall RMS, which includes the pauses — so a voice that pauses less got a louder bed.
+Measured across six voices reading the *same* grandson line at the *same* nominal level, the
+delivered ratio ranged from **1.1 dB to 6.3 dB**. A dial that means six different things makes
+"choose a level by ear" meaningless. `speech_rms` now measures only the frames above 10% of
+the envelope peak, and the bed is referenced to that.
+
+**3. An equal nominal level is not an equal delivered level across lines.** `mobile-poor`
+compresses at 0.85, and a compressor lifts the bed-only passages toward its target, so:
+
+| nominal | delivered on `landline` | delivered on `bad-line` |
+|---|---|---|
+| −15 dB | 8.2 dB | **3.7 dB** |
+| −18 dB | — | 6.5 dB |
+| −22 dB | — | **10.5 dB** |
+| −26 dB | — | 14.5 dB |
+
+At 3.7 dB the voice is genuinely hard work to follow, and `bad-line` already masks heavily
+through packet loss, hard compression and mu-law quantisation — the bed does not need to do
+that job twice. `BAD_LINE_BED_DB` is −22 dB, which lands at 10.5 dB delivered, level with the
+cleaner profiles. **The delivered ratio is the thing held constant; the nominal number is an
+implementation detail of whichever line it is on**, and a test asserts the three persona
+profiles land within 6 dB of each other.
+
+**Also added: the app refuses to start if both personas have the same voice.** A `.env` where
+`PERSONA_ELDER_VOICE` and `PERSONA_GRANDSON_VOICE` match is not a degraded demo, it is a
+broken one — the relay works *because* the scammer hears someone else pick up the phone. It is
+an easy mistake to make by copying a line, so `Settings` validates it, case- and
+whitespace-insensitively, and fails at startup rather than halfway through a recorded call.
+
+**The grandson's audition uses his own line,** not Dada's. Judging a 27-year-old on a line
+that opens with `<slow>` would have been judging the tag, not the voice.

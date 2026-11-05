@@ -41,12 +41,13 @@ from app.core.audio.ambience import AMBIENCE_BY_NAME, AmbienceBed
 from app.core.audio.call_profile import (
     CALL_PROFILES,
     DEFAULT_ELDER_PROFILE,
+    GRANDSON_PROFILE,
     PROFILES_BY_NAME,
     CallProfile,
 )
 from app.core.audio.framing import float32_to_pcm, pcm_to_float32, pcm_to_wav
 from app.core.cost import BillingPool
-from app.core.tags import ELDER_TAGS, billable_characters, sanitize_tags
+from app.core.tags import ELDER_TAGS, GRANDSON_TAGS, billable_characters, sanitize_tags
 from app.infra.budget import BudgetGuard
 from app.infra.db import create_engine, create_session_factory
 from app.infra.logging import configure_logging
@@ -73,6 +74,15 @@ AUDITION_LINE = (
     "Haan beta, <slow> ek minute. <coughs> Mera chashma kahan gaya. "
     "<pauses> Aap apna employee number bataiye na, main likh leta hoon. "
     "<sigh> Railway mein aise hi hota tha."
+)
+#: The grandson's line, for choosing his voice. Judging him on Dada's line would mislead:
+#: `<slow>` drags out everything after it, and the whole point of the grandson is that he is
+#: crisp where his grandfather is slow. He gets only the four tags he is allowed, and barely
+#: needs them.
+GRANDSON_LINE = (
+    "Ek second, main baat karta hoon. <clears throat> Main bank mein operations mein hoon. "
+    "<pauses> Aap ye bataiye, ye notice kis department se aaya hai, aur kiske authority par? "
+    "<sigh> Dadaji ne jo likha hai, naam match nahi kar raha."
 )
 SAMPLE_RATE = 24000
 
@@ -102,6 +112,12 @@ def main() -> int:
         help="render every voice through one profile, to compare voices on equal terms",
     )
     parser.add_argument(
+        "--grandson",
+        action="store_true",
+        help="audition the grandson instead: his own line, his tag vocabulary, unaged, on "
+        "the same room and line as the elder",
+    )
+    parser.add_argument(
         "--profile",
         default=DEFAULT_ELDER_PROFILE,
         help=f"profile used by --aged. One of {[p.name for p in CALL_PROFILES]}",
@@ -128,8 +144,8 @@ def main() -> int:
     if not settings.gnani_api_key:
         print("GNANI_API_KEY is not set in .env", file=sys.stderr)
         return 2
-    if not args.ladder and not args.aged and not args.bed_db:
-        print("nothing to do: pass --ladder, --aged or --bed-db", file=sys.stderr)
+    if not args.ladder and not args.aged and not args.bed_db and not args.grandson:
+        print("nothing to do: pass --ladder, --aged, --bed-db or --grandson", file=sys.stderr)
         return 2
     if args.profile not in PROFILES_BY_NAME:
         print(f"unknown profile {args.profile!r}; have {sorted(PROFILES_BY_NAME)}", file=sys.stderr)
@@ -140,7 +156,7 @@ def main() -> int:
 
     if args.voices:
         voices = tuple(v.strip() for v in args.voices.split(",") if v.strip())
-    elif args.aged:
+    elif args.aged or args.grandson:
         voices = MALE_VOICES if args.male else FEMALE_VOICES
     else:
         voices = (LEAD_VOICE,)
@@ -158,6 +174,7 @@ def main() -> int:
 
     ladder = tuple(_with_room(p, args.room) for p in CALL_PROFILES) if args.ladder else ()
     chosen = _with_room(PROFILES_BY_NAME[args.profile], args.room) if args.aged else None
+    grandson = _with_room(GRANDSON_PROFILE, args.room) if args.grandson else None
     sweep: tuple[CallProfile, ...] = ()
     if levels:
         base = _with_room(PROFILES_BY_NAME[args.profile], args.room)
@@ -172,10 +189,13 @@ def main() -> int:
             for level in levels
         )
 
-    # The persona is only allowed six of the thirteen tags. Running the audition line through
-    # the same filter the persona output will go through means the line cannot quietly use a
-    # tag the character is forbidden, and proves the filter on real text.
-    text, dropped = sanitize_tags(args.text, ELDER_TAGS)
+    # Each persona is allowed only part of the thirteen-tag catalogue. Running the audition
+    # line through the same filter the persona output will go through means the line cannot
+    # quietly use a tag the character is forbidden, and proves the filter on real text.
+    allowed = GRANDSON_TAGS if args.grandson else ELDER_TAGS
+    if args.grandson and args.text == AUDITION_LINE:
+        args.text = GRANDSON_LINE
+    text, dropped = sanitize_tags(args.text, allowed)
     if dropped:
         print(f"Stripped tags not allowed for an elder persona: {', '.join(dropped)}")
 
@@ -187,6 +207,8 @@ def main() -> int:
         print(f"Realism ladder: {' -> '.join(p.name for p in ladder)}")
     if chosen is not None:
         print(f"Per-voice profile: {chosen.name}")
+    if grandson is not None:
+        print(f"Grandson profile: {_describe(grandson)}")
     if args.room:
         print(f"Room overridden to: {args.room}")
     if sweep:
@@ -199,7 +221,7 @@ def main() -> int:
     )
 
     args.out.mkdir(parents=True, exist_ok=True)
-    return asyncio.run(_run(settings, voices, ladder, chosen, sweep, args.out, text))
+    return asyncio.run(_run(settings, voices, ladder, chosen, grandson, sweep, args.out, text))
 
 
 def _with_room(profile: CallProfile, room: str | None) -> CallProfile:
@@ -225,6 +247,7 @@ async def _run(
     voices: tuple[str, ...],
     ladder: tuple[CallProfile, ...],
     chosen: CallProfile | None,
+    grandson: CallProfile | None,
     sweep: tuple[CallProfile, ...],
     out: Path,
     text: str,
@@ -289,7 +312,12 @@ async def _run(
             if fastest is None or first_byte_ms < fastest[1]:
                 fastest = (voice, first_byte_ms)
 
-            wanted = (*ladder, *((chosen,) if chosen is not None else ()), *sweep)
+            wanted = (
+                *ladder,
+                *((chosen,) if chosen is not None else ()),
+                *((grandson,) if grandson is not None else ()),
+                *sweep,
+            )
             for profile in wanted:
                 if profile.ambience is not None and profile.ambience.name not in beds:
                     beds[profile.ambience.name] = AmbienceBed(profile.ambience, SAMPLE_RATE)

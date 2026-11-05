@@ -8,7 +8,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, PostgresDsn, RedisDsn
+from pydantic import Field, PostgresDsn, RedisDsn, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.cost import CostModel
@@ -60,6 +60,24 @@ class Settings(BaseSettings):
     # part of the character rather than part of the deployment.
     persona_elder_voice: str = ""
     persona_grandson_voice: str = ""
+
+    @model_validator(mode="after")
+    def _personas_must_sound_different(self) -> Settings:
+        """Refuse to start with one voice for both personas.
+
+        The family relay works because the scammer hears a different person take the phone.
+        Two personas on one voice is not a degraded demo, it is a broken one, and it is an
+        easy mistake to make by copying a line in `.env`. Better to fail at startup than
+        halfway through a recorded call.
+        """
+        elder = self.persona_elder_voice.strip().casefold()
+        grandson = self.persona_grandson_voice.strip().casefold()
+        if elder and grandson and elder == grandson:
+            raise ValueError(
+                "PERSONA_ELDER_VOICE and PERSONA_GRANDSON_VOICE are both "
+                f"{self.persona_elder_voice!r}; the relay needs two different voices"
+            )
+        return self
 
     # Evon is not on Gnani's API platform, so the LLM is always OpenAI-compatible.
     llm_base_url: str = ""
