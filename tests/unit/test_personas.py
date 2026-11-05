@@ -110,6 +110,7 @@ class TestProfiles:
                 persona_id=PersonaId.DADA,
                 display_name="x",
                 prompt_file="dada.v1.md",
+                filler_file="fillers.dada.v1.txt",
                 allowed_tags=frozenset({"winks"}),
                 call_profile="mobile",
                 voice_setting="persona_elder_voice",
@@ -220,3 +221,14 @@ class TestVoiceConfiguration:
         """Voices are chosen by ear over several sessions, so half-configured is normal."""
         assert self._settings("Devansh", "").persona_grandson_voice == ""
         assert self._settings("", "").persona_elder_voice == ""
+
+
+class TestFillerFiles:
+    @pytest.mark.parametrize("profile", RELAY, ids=lambda p: p.persona_id.value)
+    def test_the_filler_file_exists(self, profile: PersonaProfile) -> None:
+        assert (PROMPT_DIR / profile.filler_file).is_file()
+
+    @pytest.mark.parametrize("profile", RELAY, ids=lambda p: p.persona_id.value)
+    def test_personas_do_not_share_a_filler_file(self, profile: PersonaProfile) -> None:
+        files = [other.filler_file for other in RELAY]
+        assert len(files) == len(set(files))

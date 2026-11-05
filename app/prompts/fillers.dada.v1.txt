@@ -1,0 +1,24 @@
+# Stall phrases for Dada, spoken while the dialogue model is still generating.
+#
+# One per line. Blank lines and lines starting with # are ignored. Every phrase is
+# pre-synthesised into the TTS cache before a call, so playback is instant and free.
+#
+# Rules these follow, and why:
+#  - Under about three seconds. A filler has to end before the real reply is ready, or it
+#    becomes the thing the scammer is waiting through.
+#  - In character while saying nothing. Each one is an old man being slow, not a chatbot
+#    acknowledging a request. "Ek minute" buys time; "Let me check that" does not.
+#  - No commitments, no numbers, no agreement. The real reply has not been generated yet,
+#    so a filler must not promise anything the reply then contradicts.
+#  - At most one tag, near the front, because a Timbre tag applies to the end of the input.
+
+Haan beta, <slow> ek minute.
+Arre, <coughs> zara ruko.
+Haan haan, <slow> sun raha hoon.
+<clears throat> Ek second beta.
+Achha, <slow> samajhne do mujhe.
+Haan, <exhales> likh raha hoon.
+Zara dheere boliye na.
+<slow> Ek minute, chashma kahan hai.
+Arre haan, <slow> bolo bolo.
+Haan ji, <coughs> sun raha hoon main.

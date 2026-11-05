@@ -29,6 +29,11 @@ class PersonaProfile(BaseModel):
     persona_id: PersonaId
     display_name: str = Field(description="Shown in the dashboard transcript.")
     prompt_file: str = Field(description="Filename under app/prompts/, read by the service layer.")
+    filler_file: str = Field(
+        description="Filename under app/prompts/ holding this persona's stall phrases, one "
+        "per line. Separate from the prompt because these are pre-synthesised verbatim "
+        "rather than sent to a model."
+    )
     allowed_tags: frozenset[str] = Field(
         description="Timbre tags this persona may use. Anything else is stripped before "
         "synthesis, because unknown tags are billed and then silently discarded."
@@ -56,6 +61,7 @@ RELAY: tuple[PersonaProfile, ...] = (
         persona_id=PersonaId.DADA,
         display_name="Dada",
         prompt_file="dada.v1.md",
+        filler_file="fillers.dada.v1.txt",
         allowed_tags=ELDER_TAGS,
         call_profile=DEFAULT_ELDER_PROFILE,
         voice_setting="persona_elder_voice",
@@ -64,6 +70,7 @@ RELAY: tuple[PersonaProfile, ...] = (
         persona_id=PersonaId.GRANDSON,
         display_name="Grandson",
         prompt_file="grandson.v1.md",
+        filler_file="fillers.grandson.v1.txt",
         allowed_tags=GRANDSON_TAGS,
         call_profile=GRANDSON_PROFILE.name,
         voice_setting="persona_grandson_voice",

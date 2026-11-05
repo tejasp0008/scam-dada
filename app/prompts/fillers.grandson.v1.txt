@@ -1,0 +1,14 @@
+# Stall phrases for the grandson, spoken while the dialogue model is still generating.
+#
+# Format and rules as in fillers.dada.v1.txt. His are shorter and crisper than his
+# grandfather's: the contrast between the two is the point of the relay, and a 27-year-old
+# who stalls like a 74-year-old throws that away.
+
+Ek second.
+Haan, boliye.
+<clears throat> Ji, suniye.
+Ruko, ek minute.
+Haan, main dekh raha hoon.
+Accha, samjha.
+<pauses> Haan ji.
+Ek second, note kar raha hoon.
