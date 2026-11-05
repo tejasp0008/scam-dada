@@ -10,6 +10,7 @@ from app.core.tags import (
     TIMBRE_V3_TAGS,
     billable_characters,
     sanitize_tags,
+    tidy_for_speech,
 )
 
 
@@ -101,3 +102,44 @@ class TestBilling:
         documented = "Hello! <giggle> Great to hear from you."
         assert billable_characters(documented) == 39
         assert billable_characters(documented) != 42
+
+
+class TestTidyForSpeech:
+    """Both of these were seen on a real call, and both cost characters for nothing."""
+
+    def test_line_breaks_become_spaces(self) -> None:
+        assert tidy_for_speech("Haan haan.\n\nSabse pehle naam bataiye.") == (
+            "Haan haan. Sabse pehle naam bataiye."
+        )
+
+    def test_runs_of_whitespace_collapse(self) -> None:
+        assert tidy_for_speech("Haan   beta\t\tek  minute") == "Haan beta ek minute"
+
+    def test_a_leading_silence_tag_is_dropped(self) -> None:
+        """The filler already covered that beat; this would be dead air on top of it."""
+        assert tidy_for_speech("<pauses> Haan beta kaun?") == "Haan beta kaun?"
+
+    def test_several_leading_silence_tags_are_all_dropped(self) -> None:
+        assert tidy_for_speech("<pauses> <pauses> Haan beta") == "Haan beta"
+
+    def test_a_silence_tag_in_the_middle_is_kept(self) -> None:
+        """Mid-utterance it is doing real work: an old man losing his thread."""
+        text = "Haan beta ek minute. <pauses> Kya bola aapne?"
+        assert tidy_for_speech(text) == text
+
+    def test_a_different_leading_tag_is_kept(self) -> None:
+        """`<slow>` at the front is the cheapest elderly-voice effect available."""
+        assert tidy_for_speech("<slow> Haan beta ek minute") == "<slow> Haan beta ek minute"
+
+    def test_a_leading_silence_tag_before_a_useful_tag_is_dropped(self) -> None:
+        assert tidy_for_speech("<pauses> <slow> Haan beta") == "<slow> Haan beta"
+
+    def test_plain_text_is_untouched(self) -> None:
+        assert tidy_for_speech("Haan beta kaun bol raha hai") == "Haan beta kaun bol raha hai"
+
+    def test_empty_text_stays_empty(self) -> None:
+        assert tidy_for_speech("   \n  ") == ""
+
+    def test_it_reduces_the_billable_count(self) -> None:
+        raw = "<pauses> Haan haan.\n\nSabse pehle naam bataiye."
+        assert billable_characters(tidy_for_speech(raw)) < billable_characters(raw)

@@ -84,6 +84,33 @@ def sanitize_tags(text: str, allowed: Iterable[str]) -> tuple[str, tuple[str, ..
     return cleaned, tuple(dropped)
 
 
+#: A tag that only inserts silence. Useful mid-utterance, dead weight at the very start.
+_SILENCE_TAG = "pauses"
+
+
+def tidy_for_speech(text: str) -> str:
+    """Normalise a model's reply into something worth sending to the synthesiser.
+
+    Two things observed on real calls, both of which cost billable characters and give
+    nothing back:
+
+    * **Line breaks.** The dialogue model emits paragraph breaks even when told to produce
+      plain speech. They are billed, they are not spoken, and they are invisible in a log,
+      which is the worst combination.
+    * **A leading `<pauses>`.** The model latched onto opening every reply with it. Mid
+      sentence that tag is useful; as the first thing in an utterance it is silence played
+      immediately after the filler phrase already covered that beat - so it is dead air
+      bolted onto the one place in the call where dead air is most expensive.
+    """
+    cleaned = re.sub(r"\s+", " ", text).strip()
+    while True:
+        match = re.match(r"<([^<>]{1,24})>\s*", cleaned)
+        if match is None or match.group(1) != _SILENCE_TAG:
+            break
+        cleaned = cleaned[match.end() :]
+    return cleaned.strip()
+
+
 def billable_characters(text: str) -> int:
     """What Timbre will charge for this text, tags and angle brackets included.
 

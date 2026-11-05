@@ -16,7 +16,7 @@ from app.core.audio.framing import float32_to_pcm
 from app.core.events import EventType
 from app.core.models import PersonaId, Speaker
 from app.core.state import CallState
-from app.providers.base import SttConfig
+from app.providers.base import Role, SttConfig
 from app.providers.mock import MockLLMProvider, MockSTTProvider, MockTTSProvider
 from app.services.orchestrator import CallConfig, CallOrchestrator
 from app.services.recorder import CallRecorder
@@ -77,7 +77,13 @@ def build(
         out.append(chunk)
 
     orchestrator = CallOrchestrator(
-        CallConfig(call_id="call-test", handoff_after_persona_turns=handoff_after),
+        CallConfig(
+            call_id="call-test",
+            stt_config=SttConfig(model="mock", language_code="hi-IN", sample_rate=16000),
+            tts_model="mock-tts",
+            tts_language="hi-en",
+            handoff_after_persona_turns=handoff_after,
+        ),
         stt=MockSTTProvider(
             script or ("Main cyber cell se bol raha hoon.",),
             frames_per_utterance=frames_per_utterance,
@@ -87,7 +93,6 @@ def build(
         recorder=recorder,
         voices=VOICES,
         sink=write,
-        stt_config=SttConfig(model="mock", language_code="hi-IN", sample_rate=16000),
     )
     return orchestrator, recorder, out, llm
 
@@ -299,3 +304,37 @@ class TestDegradation:
         orchestrator, recorder, _, _ = build(script=("   ",))
         await orchestrator.run(audio(speech_frames=8, silence_frames=4, bursts=1))
         assert not [e for e in recorder.history() if e.type is EventType.TRANSCRIPT]
+
+
+class TestHandoffContext:
+    """The relay shares one history, which is why the new persona needs telling whose it is."""
+
+    async def test_no_note_is_added_before_a_handoff(self) -> None:
+        orchestrator, _, _, llm = build()
+        await orchestrator.run(audio(speech_frames=8, silence_frames=4, bursts=1))
+        for messages in llm.chat_calls:
+            assert sum(m.role is Role.SYSTEM for m in messages) == 1
+
+    async def test_after_a_handoff_the_grandson_is_told_whose_lines_those_were(self) -> None:
+        """On a real call he answered with his grandfather's line about his glasses."""
+        orchestrator, _, _, llm = build(
+            script=("Ek.", "Do.", "Teen."), frames_per_utterance=4, handoff_after=1
+        )
+        await orchestrator.run(audio(speech_frames=5, silence_frames=3, bursts=3))
+
+        notes = [
+            m.content for messages in llm.chat_calls for m in messages[1:] if m.role is Role.SYSTEM
+        ]
+        assert notes, "no handoff note was ever sent"
+        assert "handed to you" in notes[-1]
+        assert "Dada" in notes[-1]
+
+    async def test_the_note_goes_last_so_it_is_closest_to_the_generation(self) -> None:
+        orchestrator, _, _, llm = build(
+            script=("Ek.", "Do.", "Teen."), frames_per_utterance=4, handoff_after=1
+        )
+        await orchestrator.run(audio(speech_frames=5, silence_frames=3, bursts=3))
+
+        with_note = [m for m in llm.chat_calls if any(x.role is Role.SYSTEM for x in m[1:])]
+        assert with_note
+        assert with_note[-1][-1].role is Role.SYSTEM

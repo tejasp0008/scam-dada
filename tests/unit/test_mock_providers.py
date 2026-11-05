@@ -6,10 +6,13 @@ becomes meaningless.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from pydantic import BaseModel
 
 from app.core.audio.framing import PRISMA_FRAME_BYTES
+from app.core.tags import ELDER_TAGS, sanitize_tags
 from app.providers.base import (
     BadRequest,
     ChatMessage,
@@ -20,6 +23,7 @@ from app.providers.base import (
     TtsRequest,
 )
 from app.providers.mock import (
+    DEFAULT_PERSONA_REPLIES,
     DEFAULT_SCAMMER_SCRIPT,
     MockLLMProvider,
     MockSTTProvider,
@@ -148,3 +152,32 @@ async def test_complete_json_raises_when_a_schema_needs_real_data() -> None:
 
     with pytest.raises(BadRequest, match="queue_json"):
         await MockLLMProvider().complete_json([], Strict)
+
+
+class TestFixturesMatchThePersonas:
+    """The mocks are what the integration suite and the dashboard are developed against.
+
+    If a fixture uses a tag the persona is forbidden, the live filter strips it and the mock
+    stops resembling what the real model is asked to produce - so the fixture drifts from
+    reality in exactly the place that is hardest to notice.
+    """
+
+    @pytest.mark.parametrize("reply", DEFAULT_PERSONA_REPLIES)
+    def test_every_canned_reply_uses_only_tags_an_elder_may_use(self, reply: str) -> None:
+        cleaned, dropped = sanitize_tags(reply, ELDER_TAGS)
+        assert dropped == (), f"{reply!r} uses {dropped}"
+        assert cleaned == reply
+
+    @pytest.mark.parametrize("reply", DEFAULT_PERSONA_REPLIES)
+    def test_no_canned_reply_speaks_as_a_woman(self, reply: str) -> None:
+        """The lead persona is a 74-year-old man; feminine verb forms are a leftover."""
+        assert "rahi hoon" not in reply
+        assert "bataungi" not in reply
+
+    @pytest.mark.parametrize("line", DEFAULT_SCAMMER_SCRIPT)
+    def test_the_scammer_script_stays_visibly_fictional(self, line: str) -> None:
+        """Synthetic data only, and a fixture is the easiest place to break that rule."""
+        assert not re.search(r"\b[6-9]\d{9}\b", line), "looks like a real mobile number"
+        assert not re.search(r"\b\d{4}\s?\d{4}\s?\d{4}\b", line), "looks like an Aadhaar"
+        if "@" in line:
+            assert "@demo" in line, "UPI handles in fixtures must be on @demo"

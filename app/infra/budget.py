@@ -175,7 +175,15 @@ class BudgetGuard:
         call_id: str | None = None,
         cache_hit: bool = False,
     ) -> None:
-        """Increment the counters (cache hits excepted) and persist a usage row."""
+        """Increment the counters (cache hits excepted) and persist a usage row.
+
+        A disabled guard does no accounting at all, not merely no enforcement. That is what
+        makes `BUDGET_ENABLED=false` safe in tests: mock providers would otherwise write
+        zero-credit rows into the same `api_usage` table that backs every credit figure in
+        the README, and a ledger with invented rows in it is not a measurement.
+        """
+        if not self._enabled:
+            return
         if not cache_hit:
             pipe = self._redis.pipeline()
             if charge.credits:

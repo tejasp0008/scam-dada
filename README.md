@@ -8,9 +8,9 @@ fake officer names, the shape of the script.
 
 Built for the Great Indian AI Internship Challenge on Gnani's speech models.
 
-> **Status: Phase 1 complete, personas drafted.** The three provider adapters work against
-> the live APIs. Nothing in this README is a claimed capability unless it is listed as done
-> below.
+> **Status: Phase 2 complete.** A scripted five-turn call runs end to end on the live
+> APIs — transcript, persona replies, barge-in and the family relay. Nothing in this README
+> is a claimed capability unless it is listed as done below.
 
 ## What works today
 
@@ -33,7 +33,23 @@ Built for the Great Indian AI Internship Challenge on Gnani's speech models.
 | **Persona voices** | Both personas are Devansh on `bad-line` — relatives share timbre — pushed apart in processing to +2.26 semitones and 20% in rate. Startup fails only if two personas would render *identically* |
 | **Audio tags** | The 13-tag Timbre v3.0 catalogue, with a per-persona allowed set; unknown tags are billed and then discarded by the API, so they are stripped first |
 | **Personas** | Dada and grandson prompts, ethics block shared and digest-pinned, relay registry |
-| Tests | 401 offline + 64 contract, `ruff` and `mypy` clean (`mypy --strict` on `core` and `providers`) |
+| **Orchestrator** | One object per call: rotating STT, local VAD, barge-in, fillers, sentence-by-sentence replies, per-turn latency |
+| **Turn-taking** | Replies cut at the first sentence boundary so synthesis starts before generation finishes; handles decimals, audio tags and unpunctuated run-ons |
+| **STT rotation** | Prisma's 15-minute cap becomes a seam, not a hang-up — rotated before the cap, deferred mid-utterance, and reactive if the session dies at it |
+| **Call transport** | `/ws/call`: PCM in, persona audio out, JSON control on the same socket, with an explicit flush so barge-in is instant |
+| **Browser simulator** | A page at `/` with two AudioWorklets — capture resamples to 16 kHz and frames to 1024 bytes, playback is a ring buffer so a barge-in can drop queued audio |
+| **Scripted call driver** | `scripts/fake_call.py` runs a whole call with no microphone, so a demo take is reproducible |
+| Tests | 507 offline + 64 contract, `ruff` and `mypy` clean (`mypy --strict` on `core` and `providers`) |
+
+Measured on two consecutive live calls through the orchestrator (2026-11-06), per turn,
+from the caller stopping speaking:
+
+| leg | range |
+|---|---|
+| End of speech → transcript | 448–565 ms |
+| LLM first token | 243–706 ms |
+| TTS first audio | 54–860 ms |
+| Filler phrase played | every turn |
 
 Measured on the live APIs by `make smoke` (n=1 per provider, 2026-11-04):
 
@@ -46,8 +62,8 @@ Measured on the live APIs by `make smoke` (n=1 per provider, 2026-11-04):
 | LLM validated JSON (`openai/gpt-oss-120b`) | 762–1769 ms |
 | Fallback recovery after a 404 | 595–813 ms |
 
-Not built yet: the orchestrator, the intelligence layer, the dashboard and the evidence
-pack. The persona prompts exist but nothing drives them yet. See [PLAN.md](PLAN.md) for the phase plan and
+Not built yet: the intelligence layer (entities, scam stages, pressure score, canaries,
+hang-up risk), the control-room dashboard, and the evidence pack. See [PLAN.md](PLAN.md) for the phase plan and
 [docs/DECISIONS.md](docs/DECISIONS.md) for why the architecture looks like this.
 
 ## Which Gnani models are used, and where
@@ -132,7 +148,7 @@ cp .env.example .env     # then fill in GNANI_API_KEY and the LLM_* values
 make install             # venv on 3.11 + dev dependencies
 make up                  # postgres + redis
 make migrate             # apply the baseline schema
-make test                # 401 tests, offline, zero API cost
+make test                # 507 tests, offline, zero API cost
 make dev                 # api on http://localhost:8000
 ```
 
@@ -157,6 +173,7 @@ surprise on stage.
 | `make audition` | **Spends credits.** One line in every Timbre v3.0 voice. `ARGS="--male"` for the male set |
 | `make audition-male` | **Spends credits** (6 requests). Every male voice at Dada's chosen profile, to compare voices |
 | `make audition-ladder` | 1 request, or free from cache. One voice through all six realism profiles, to choose a profile |
+| `python scripts/fake_call.py` | **Spends credits** on the first run, then free from cache. Drives a whole scripted call over the WebSocket, with no microphone |
 | `python scripts/audition_voices.py --male --grandson` | **Spends credits** (6 requests). The grandson's own line in every male voice, on Dada's room and line |
 | `python scripts/audition_voices.py --voices Devansh --handoff` | Free from cache. Dada then the grandson in one clip, room tone continuous across the join — the only way to judge whether the relay reads as two people |
 | `make lint` / `make fmt` / `make types` | `ruff` and `mypy` |
@@ -216,6 +233,24 @@ real limit.
 - **Timbre documents no cancel message** on either streaming transport, so an interrupted
   reply is abandoned client-side rather than cancelled upstream. Audio already synthesised
   has already been billed.
+- **TTS concurrency is one.** Timbre refuses a second active request per API key with
+  `429 Only 1 active request is allowed at a time`, so synthesis is serialised in the
+  adapter. Two simultaneous calls would queue behind each other (DECISIONS 0023).
+- **Groq's input-token limit caps call pace.** The system prompt is ~6.2 KB, about 1600
+  input tokens, sent every turn; the free tier allows 7000 per minute, so roughly four turns
+  a minute before the fallback model takes over. Trimming the prompt is the obvious fix and
+  has not been done.
+- **The filler starts on the transcript, not on the VAD closing.** DECISIONS 0012 reasoned
+  it should start earlier; the code deliberately does not, because the VAD gate needs 384 ms
+  of silence and ordinary mid-sentence pauses are longer than that, so firing there would
+  make the persona talk over the caller. It therefore covers the LLM and TTS legs but not
+  the 450–565 ms of transcription (DECISIONS 0024).
+- **`docker compose` also publishes port 8000.** A stale `api` container and a local
+  `uvicorn` both answer there, and `/readyz` will happily report the container's mock
+  providers while the real server runs beside it. Stop the container or use another port.
+- **Dialogue model output is not always clean.** One live call produced a few characters of
+  Arabic script mid-reply. The fallback handles errors, not nonsense; nothing filters
+  unexpected scripts before synthesis yet.
 - **The call chain runs per utterance, not per chunk.** Measured at 0–145 ms for a 13 s
   render (~1% of real time), but the WSOLA time-stretch needs lookahead, so today the whole
   utterance is processed before the first byte goes out. Fillers will be rendered once at

@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scam Dada — call simulator</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #262b36; --text: #e6e8ee;
+    --muted: #8b93a7; --accent: #6ea8fe; --caller: #ffb86b; --persona: #7ee787;
+    --danger: #ff7b72;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, sans-serif;
+  }
+  header {
+    padding: 18px 20px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+  }
+  h1 { font-size: 17px; margin: 0; font-weight: 650; }
+  .sub { color: var(--muted); font-size: 13px; }
+  main { padding: 20px; max-width: 860px; margin: 0 auto; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 18px; }
+  button {
+    font: inherit; font-weight: 600; padding: 9px 16px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--text);
+    cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #0b1020; }
+  button.danger { border-color: var(--danger); color: var(--danger); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .pill {
+    font-size: 12px; padding: 3px 9px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--muted);
+  }
+  .pill.live { border-color: var(--persona); color: var(--persona); }
+  .pill.speaking { border-color: var(--accent); color: var(--accent); }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 14px 16px; margin-bottom: 16px;
+  }
+  .panel h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .07em;
+    color: var(--muted); margin: 0 0 10px;
+  }
+  #transcript { min-height: 150px; max-height: 50vh; overflow-y: auto; }
+  .turn { margin-bottom: 9px; }
+  .who { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  .caller .who { color: var(--caller); }
+  .persona .who { color: var(--persona); }
+  .meter { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
+  .meter > i { display: block; height: 100%; width: 0; background: var(--accent); }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  td { padding: 3px 0; }
+  td:last-child { text-align: right; color: var(--muted); }
+  .note { color: var(--muted); font-size: 13px; }
+  code { background: #0b0d12; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Scam Dada</h1>
+  <span class="sub">call simulator</span>
+  <span class="pill" id="status">idle</span>
+  <span class="pill" id="speaking">quiet</span>
+  <span class="sub" id="callid"></span>
+</header>
+
+<main>
+  <div class="row">
+    <button class="primary" id="start">Start call</button>
+    <button class="danger" id="hangup" disabled>Hang up</button>
+    <span class="note">Use headphones. Speakers feed the persona's own room tone back into
+    the microphone, which trips the barge-in detector.</span>
+  </div>
+
+  <div class="panel">
+    <h2>Your microphone</h2>
+    <div class="meter"><i id="level"></i></div>
+  </div>
+
+  <div class="panel">
+    <h2>Transcript</h2>
+    <div id="transcript"><p class="note">Nothing yet. Press start and speak as the scammer.</p></div>
+  </div>
+
+  <div class="panel">
+    <h2>Last turn</h2>
+    <table>
+      <tr><td>End of speech → transcript</td><td id="m-stt">—</td></tr>
+      <tr><td>LLM first token</td><td id="m-llm">—</td></tr>
+      <tr><td>TTS first audio</td><td id="m-tts">—</td></tr>
+      <tr><td>Filler played</td><td id="m-filler">—</td></tr>
+      <tr><td>Interruptions</td><td id="m-barge">0</td></tr>
+    </table>
+  </div>
+
+  <div class="panel">
+    <h2>Call</h2>
+    <table>
+      <tr><td>State</td><td id="c-state">—</td></tr>
+      <tr><td>Who is holding the phone</td><td id="c-persona">—</td></tr>
+      <tr><td>Scammer time wasted</td><td id="c-wasted">0s</td></tr>
+    </table>
+  </div>
+</main>
+
+<script>
+const ui = (id) => document.getElementById(id);
+let ctx, socket, captureNode, playbackNode, stream, startedAt, barges = 0, ended = false;
+
+function setStatus(text, cls = "") { ui("status").textContent = text; ui("status").className = "pill " + cls; }
+function setSpeaking(on) {
+  ui("speaking").textContent = on ? "persona speaking" : "quiet";
+  ui("speaking").className = "pill " + (on ? "speaking" : "");
+}
+
+function addTurn(who, text, label) {
+  const transcript = ui("transcript");
+  if (transcript.querySelector(".note")) transcript.innerHTML = "";
+  const div = document.createElement("div");
+  div.className = "turn " + who;
+  const h = document.createElement("div");
+  h.className = "who";
+  h.textContent = label;
+  const p = document.createElement("div");
+  p.textContent = text;
+  div.append(h, p);
+  transcript.append(div);
+  transcript.scrollTop = transcript.scrollHeight;
+}
+
+async function start() {
+  ui("start").disabled = true;
+  setStatus("connecting");
+  ended = false;
+  barges = 0;
+  ui("m-barge").textContent = "0";
+
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      // The browser's own processing fights ours: AGC would flatten the level the energy VAD
+      // thresholds on, and noise suppression would eat a scammer's room.
+      audio: { echoCancellation: true, noiseSuppression: false, autoGainControl: false },
+    });
+  } catch (err) {
+    setStatus("microphone refused", "");
+    ui("start").disabled = false;
+    return;
+  }
+
+  ctx = new AudioContext();
+  await ctx.audioWorklet.addModule("/static/capture-worklet.js");
+  await ctx.audioWorklet.addModule("/static/playback-worklet.js");
+
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  socket = new WebSocket(`${proto}://${location.host}/ws/call`);
+  socket.binaryType = "arraybuffer";
+
+  socket.onopen = () => {
+    const source = ctx.createMediaStreamSource(stream);
+    captureNode = new AudioWorkletNode(ctx, "capture-processor");
+    captureNode.port.onmessage = (event) => {
+      if (socket.readyState === WebSocket.OPEN) socket.send(event.data.buffer);
+      let peak = 0;
+      const frame = event.data;
+      for (let i = 0; i < frame.length; i += 8) peak = Math.max(peak, Math.abs(frame[i]) / 32768);
+      ui("level").style.width = Math.min(100, peak * 180) + "%";
+    };
+    source.connect(captureNode);
+    // Connected to the destination with no gain so the graph is pulled; the capture
+    // processor writes no output, so nothing is audible from this branch.
+    captureNode.connect(ctx.destination);
+
+    playbackNode = new AudioWorkletNode(ctx, "playback-processor", { outputChannelCount: [1] });
+    playbackNode.connect(ctx.destination);
+
+    startedAt = Date.now();
+    setStatus("live", "live");
+    ui("hangup").disabled = false;
+    tickWasted();
+  };
+
+  socket.onmessage = (event) => {
+    if (typeof event.data === "string") return onControl(JSON.parse(event.data));
+    // Persona audio: s16le at the rate the server announced. The playback worklet runs at
+    // the context's rate, so resample on the way into the ring buffer.
+    const pcm = new Int16Array(event.data);
+    const samples = new Float32Array(pcm.length);
+    for (let i = 0; i < pcm.length; i += 1) samples[i] = pcm[i] / 32768;
+    playbackNode.port.postMessage({ type: "audio", samples: resample(samples, 24000, ctx.sampleRate) });
+    setSpeaking(true);
+    clearTimeout(window.__quiet);
+    window.__quiet = setTimeout(() => setSpeaking(false), 400);
+  };
+
+  socket.onclose = () => finish("connection closed");
+  socket.onerror = () => setStatus("socket error");
+}
+
+function resample(samples, from, to) {
+  if (from === to) return samples;
+  const ratio = from / to;
+  const out = new Float32Array(Math.floor(samples.length / ratio));
+  for (let i = 0; i < out.length; i += 1) {
+    const pos = i * ratio;
+    const index = Math.floor(pos);
+    const frac = pos - index;
+    const next = index + 1 < samples.length ? samples[index + 1] : samples[index];
+    out[i] = samples[index] + (next - samples[index]) * frac;
+  }
+  return out;
+}
+
+function onControl(message) {
+  if (message.type === "ready") {
+    ui("callid").textContent = message.call_id;
+  } else if (message.type === "flush") {
+    // Barge-in: drop everything queued, or the persona talks over the scammer for as long
+    // as the ring buffer is deep.
+    playbackNode.port.postMessage({ type: "flush" });
+    setSpeaking(false);
+    ui("m-barge").textContent = String(++barges);
+  } else if (message.type === "event") {
+    onEvent(message.event);
+  } else if (message.type === "error") {
+    addTurn("caller", message.message, "error");
+    setStatus("error");
+  } else if (message.type === "ended") {
+    finish(message.reason || "ended");
+  }
+}
+
+function onEvent(event) {
+  if (event.type === "transcript") {
+    const persona = event.persona ? event.persona : null;
+    addTurn(persona ? "persona" : "caller", event.text, persona ? persona : "caller");
+  } else if (event.type === "latency") {
+    ui("m-stt").textContent = event.stt_final_ms != null ? event.stt_final_ms + " ms" : "—";
+    ui("m-llm").textContent = event.llm_first_token_ms != null ? event.llm_first_token_ms + " ms" : "—";
+    ui("m-tts").textContent = event.tts_first_byte_ms != null ? event.tts_first_byte_ms + " ms" : "—";
+    ui("m-filler").textContent = event.filler_played ? "yes" : "no";
+  } else if (event.type === "state_change") {
+    ui("c-state").textContent = event.to_state;
+  } else if (event.type === "persona_handoff") {
+    ui("c-persona").textContent = event.to_persona;
+    addTurn("persona", `${event.from_persona} hands the phone to ${event.to_persona} — ${event.reason}`, "handoff");
+  }
+}
+
+function tickWasted() {
+  if (ended) return;
+  ui("c-wasted").textContent = Math.round((Date.now() - startedAt) / 1000) + "s";
+  requestAnimationFrame(() => setTimeout(tickWasted, 250));
+}
+
+function hangup() {
+  if (socket && socket.readyState === WebSocket.OPEN) socket.send("hangup");
+  finish("you hung up");
+}
+
+function finish(reason) {
+  if (ended) return;
+  ended = true;
+  setStatus(reason);
+  setSpeaking(false);
+  ui("hangup").disabled = true;
+  ui("start").disabled = false;
+  if (stream) stream.getTracks().forEach((t) => t.stop());
+  if (ctx) ctx.close();
+}
+
+ui("start").onclick = start;
+ui("hangup").onclick = hangup;
+</script>
+</body>
+</html>

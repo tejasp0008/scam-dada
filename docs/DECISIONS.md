@@ -667,3 +667,100 @@ hears one unbroken line. Verified numerically: the step across the join is 0.003
 join and 0.0187 after.
 
 Rendering the handoff cost nothing — both lines were already cached.
+
+## 0023 — Timbre allows one synthesis at a time, and abandoning a stream counts
+*2026-11-06 · Phase 2*
+
+Found on the first real call through the orchestrator, not in the documentation:
+
+```
+429 RATE_LIMITED Only 1 active request is allowed at a time.
+Wait for your current request to finish before sending another.
+```
+
+Every reply after the first failed to synthesise. The persona went silent for four turns
+while the transcript kept scrolling, which is the worst possible failure mode — it looks like
+the model stopped working.
+
+**The cause was barge-in.** `PersonaSpeaker.stop` cancels the playback task, but cancelling
+a task does not close the HTTP stream the cancelled coroutine was iterating; the generator's
+cleanup ran whenever the garbage collector got to it. Upstream the request was still
+*active*, so the next synthesis was refused. Barge-in is frequent, so this hit almost every
+call.
+
+**Two fixes, at the two layers that own the problem.**
+
+* `GnaniTimbreTTS` holds an `asyncio.Lock` for the whole stream. The limit is the vendor's
+  and applies across every call this process handles, so serialising in the adapter is
+  right; serialising in the caller would only have covered one call at a time.
+* `PersonaSpeaker` wraps the stream in `contextlib.aclosing`, so a cancelled synthesis closes
+  deterministically during unwinding rather than eventually.
+
+**And a port change this justifies.** `TTSProvider.synthesize` now returns an
+`AsyncGenerator` rather than an `AsyncIterator`. That is not tidying: a bare `AsyncIterator`
+makes no promise that the stream can be closed, and here the caller *must* be able to close
+it. The type now states the requirement that the vendor imposes.
+
+**The cost.** TTS concurrency on this account is one, so two simultaneous calls would queue
+behind each other. Fine for a demo and for the contest; it is a real ceiling for anything
+beyond that, and it belongs in the limitations list rather than in a footnote.
+
+## 0024 — Phase 2: what the persona loop actually does
+*2026-11-06 · Phase 2*
+
+Verified on real providers end to end: five scammer turns, five persona replies, a handoff,
+barge-in, and 45 seconds of persona audio. Measured per-turn latency from the caller
+stopping speaking, over two consecutive live calls:
+
+| leg | range |
+|---|---|
+| end of speech → transcript | 448–565 ms |
+| LLM first token | 243–706 ms |
+| TTS first audio | 54–860 ms |
+| filler played | every turn |
+
+**Three bugs the live calls found that the test suite could not.**
+
+1. **The orchestrator hardcoded `prisma-v3.0`, `timbre-v3.0` and `hi-en`.** Two things wrong
+   with that, and the second cost a debugging session: a vendor model name in a service
+   module breaks the rule that vendors are named only inside `app.providers`, and hardcoding
+   the STT config meant `STT_FORMAT` was ignored — so the first real call came back in
+   Devanagari instead of the transliterated Hinglish that DECISIONS 0009 chose on measured
+   evidence. The model names and the `SttConfig` now come from settings, built in the
+   transport layer.
+2. **After a handoff, the grandson spoke his grandfather's lines.** The relay shares one
+   history, which is the point — he has to know what Dada was told. But Dada's replies sit in
+   that history as `assistant` turns, so to the model they read as *its own* earlier words,
+   and it continued them: his first line was Dada's line about looking for his glasses. A
+   handoff now appends a system note naming whose words those were, placed last because the
+   instruction that has to win is the one closest to the generation.
+3. **Replies arrived with line breaks and a leading `<pauses>`.** Both are billed, neither is
+   audible, and the leading silence tag landed immediately after the filler phrase had
+   already covered that beat — dead air bolted onto the one place in a call where dead air is
+   most expensive. `tidy_for_speech` normalises whitespace and drops a leading silence tag,
+   keeping one mid-utterance where it is doing real work.
+
+**The filler starts on the transcript, not on the VAD closing.** DECISIONS 0012 reasoned that
+the local VAD closing its gate should cue the filler, since it is the only end-of-speech
+signal there is. The code does not do that, deliberately: the gate needs 12 consecutive
+silent frames (384 ms), and a mid-sentence pause longer than that is ordinary in slow
+Hinglish speech, so firing there would make the persona talk over the scammer regularly. The
+filler therefore starts when the transcript lands, which still covers the LLM and TTS legs —
+about 1.3 s of the wait — but not the 450–565 ms of transcription. Starting it earlier is
+worth revisiting with a shorter hysteresis or Prisma's own `speech_start`/silence timing.
+
+**`stt_final_ms` is measurable only because the local VAD closes first.** When Prisma's
+server-side VAD is faster than our hysteresis the transcript arrives before the gate closes
+and the number is `None` rather than zero. Reported as `None`, never as `0`.
+
+**Groq's input-token limit is a real constraint on call length.** The system prompt is ~6.2 KB,
+about 1600 input tokens, sent every turn. The free tier allows 7000 input tokens per minute —
+roughly four turns a minute — and a live call tripped it, at which point the fallback
+switched to `openai/gpt-oss-120b` before the first token exactly as DECISIONS 0014 intended.
+That is the first time the fallback has fired outside a contract test. Trimming the system
+prompt is the obvious optimisation and has not been done yet.
+
+**A demo-day trap worth writing down.** `docker compose` publishes the `api` container on
+port 8000 as well, so a locally run `uvicorn` and a stale container both answer there — and
+`/readyz` was reporting mock providers from the container while the real server ran beside
+it. Stop the container, or use a different port.

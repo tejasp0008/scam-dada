@@ -14,7 +14,7 @@ import asyncio
 import hashlib
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Final
 
@@ -78,7 +78,7 @@ class CachingTTS:
         """Where this request's audio is or would be stored."""
         return self._dir / f"{cache_key(request)}.pcm"
 
-    async def synthesize(self, request: TtsRequest) -> AsyncIterator[AudioChunk]:
+    async def synthesize(self, request: TtsRequest) -> AsyncGenerator[AudioChunk, None]:
         """Yield PCM from disk if we have it, otherwise from the provider, storing as we go."""
         if not self._enabled:
             async for chunk in self._inner.synthesize(request):

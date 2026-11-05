@@ -9,7 +9,7 @@ event sequence stays asserted.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 
 from pydantic import ValidationError
 
@@ -31,7 +31,7 @@ from app.providers.base import (
 #: A synthetic scammer script. Obviously fictional: a fake officer, a reserved-range
 #: number and a @demo UPI handle, per the project's synthetic-data-only rule.
 DEFAULT_SCAMMER_SCRIPT: tuple[str, ...] = (
-    "Hello madam, main Mumbai police cyber cell se bol raha hoon.",
+    "Hello sir, main Mumbai police cyber cell se bol raha hoon.",
     "Aapke naam par ek parcel aaya hai jisme illegal items hain.",
     "Case number FAKE-CYB-0001 register ho gaya hai, abhi verify karna padega.",
     "Aap kisi ko bataiye mat, warrant nikal jayega.",
@@ -165,7 +165,7 @@ class MockTTSProvider:
         self._delay_s = delay_s
         self.requests: list[TtsRequest] = []
 
-    async def synthesize(self, request: TtsRequest) -> AsyncIterator[AudioChunk]:
+    async def synthesize(self, request: TtsRequest) -> AsyncGenerator[AudioChunk, None]:
         self.requests.append(request)
         total_ms = max(self._chunk_ms, len(request.text) * self._ms_per_char)
         chunk_count = max(1, total_ms // self._chunk_ms)
@@ -181,11 +181,15 @@ class MockTTSProvider:
 
 
 #: Canned in-character replies. Hinglish, non-threatening, and stalling by design.
+#: Canned persona replies. Masculine, because the lead persona is Dada, and restricted to
+#: the six tags an elder is allowed - `<whispers>` and `<laugh>` are excluded by
+#: `app.core.tags.ELDER_TAGS`, so a fixture using one would be silently stripped and the
+#: mock would stop resembling what the real model is asked to produce.
 DEFAULT_PERSONA_REPLIES: tuple[str, ...] = (
     "Haan beta, kaun bol raha hai? <pauses> Thoda zor se boliye.",
     "Arre police? <sigh> Mera chashma kahan rakha, ek minute.",
-    "Case number phir se boliye beta, main likh rahi hoon dheere dheere.",
-    "Kisi ko nahi bataungi. <whispers> Par bahu ghar par hai.",
+    "Case number phir se boliye beta, main likh raha hoon dheere dheere.",
+    "Kisi ko nahi bataunga. <slow> Par mera pota bank mein hai.",
     "Paisa? Mujhe phone chalana nahi aata beta, aap samjhaiye.",
 )
 

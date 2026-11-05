@@ -17,7 +17,7 @@ import asyncio
 import base64
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Any, Final
 
 import httpx
@@ -68,6 +68,12 @@ class GnaniTimbreTTS:
         self._client = client
         self._usage = usage
         self._timeout = httpx.Timeout(read_timeout, connect=connect_timeout)
+        # Timbre permits exactly one synthesis in flight per API key: a second concurrent
+        # request is refused with `429 RATE_LIMITED Only 1 active request is allowed at a
+        # time`. Measured, not documented - see DECISIONS 0023. Serialising here rather than
+        # in the caller because the limit is the vendor's and applies across every call this
+        # process is handling, not just within one.
+        self._in_flight = asyncio.Lock()
 
     def _body(self, request: TtsRequest) -> dict[str, Any]:
         return {
@@ -85,11 +91,21 @@ class GnaniTimbreTTS:
             },
         }
 
-    async def synthesize(self, request: TtsRequest) -> AsyncIterator[AudioChunk]:
+    async def synthesize(self, request: TtsRequest) -> AsyncGenerator[AudioChunk, None]:
         """Yield PCM chunks as Timbre produces them.
 
         Tag characters are billable, so the charge is priced on the text exactly as sent.
+
+        Serialised: the account allows one active request, and the lock is held for the whole
+        stream rather than just the connect, because "active" means until the response is
+        finished. A barge-in that abandons a stream therefore has to close it before the next
+        synthesis can start, which is what the `aclosing` in `PersonaSpeaker` guarantees.
         """
+        async with self._in_flight:
+            async for chunk in self._synthesize_locked(request):
+                yield chunk
+
+    async def _synthesize_locked(self, request: TtsRequest) -> AsyncIterator[AudioChunk]:
         charge: Charge | None = None
         if self._usage is not None:
             charge = self._usage.cost.price_tts(len(request.text))

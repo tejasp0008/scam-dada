@@ -49,6 +49,7 @@ class CallRecorder:
         self._sessions = session_factory
         self._seq = 0
         self._writes: set[asyncio.Task[None]] = set()
+        self._publish_failures = 0
         self.emitted: list[DomainEvent] = []
 
     @property
@@ -75,10 +76,34 @@ class CallRecorder:
         event: DomainEvent = build(self._call_id, seq, self.now())
         self.emitted.append(event)
 
-        await self._bus.publish(event)
+        await self._publish(event)
         if self._sessions is not None:
             self._schedule(self._persist_event(event))
         return event
+
+    async def _publish(self, event: DomainEvent) -> None:
+        """Fan out to live subscribers, surviving a Redis that is not there.
+
+        A call must not end because the dashboard cannot be fed. The event is already in
+        `emitted` and is still written to the database, so what is lost is the live view and
+        the reconnect log - not the evidence. Logged once per call rather than per event,
+        because a Redis outage would otherwise bury every other line in the log.
+        """
+        try:
+            await self._bus.publish(event)
+        except Exception:
+            self._publish_failures += 1
+            if self._publish_failures == 1:
+                logger.warning(
+                    "publishing events failed; the live dashboard will be blank for this call",
+                    extra={"call_id": self._call_id},
+                    exc_info=True,
+                )
+
+    @property
+    def publish_failures(self) -> int:
+        """How many events never reached the bus. Zero on a healthy call."""
+        return self._publish_failures
 
     def record_turn(
         self, turn: DomainTurn, *, latency: dict[str, int | None] | None = None

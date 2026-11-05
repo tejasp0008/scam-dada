@@ -35,9 +35,9 @@ from app.core.events import (
     TranscriptEvent,
 )
 from app.core.models import PersonaId, Speaker, Turn
-from app.core.personas import LEAD_PERSONA, PersonaProfile, next_in_relay
+from app.core.personas import LEAD_PERSONA, PersonaProfile, next_in_relay, profile_for
 from app.core.state import CallState, transition
-from app.core.tags import sanitize_tags
+from app.core.tags import sanitize_tags, tidy_for_speech
 from app.core.turn import (
     FillerRotation,
     TurnBudget,
@@ -85,9 +85,20 @@ FlushSink = Callable[[], Awaitable[None]]
 
 @dataclass(slots=True)
 class CallConfig:
-    """Everything about a call that is not a provider or a transport."""
+    """Everything about a call that is not a provider or a transport.
+
+    The model names and the synthesis language come in from settings rather than being
+    written here. Two reasons, and the second one cost a debugging session: a vendor model
+    name in a service module breaks the rule that vendors are named only inside
+    `app.providers`, and hardcoding the STT config here silently ignored `STT_FORMAT`, so a
+    call transcribed in Devanagari instead of the transliterated Hinglish that DECISIONS
+    0009 chose on measured evidence.
+    """
 
     call_id: str
+    stt_config: SttConfig
+    tts_model: str
+    tts_language: str
     sample_rate_in: int = 16000
     sample_rate_out: int = 24000
     #: Floor for the family relay. The real trigger is hang-up risk, which arrives with the
@@ -129,7 +140,6 @@ class CallOrchestrator:
         voices: dict[PersonaId, str],
         sink: AudioSink,
         flush: FlushSink | None = None,
-        stt_config: SttConfig | None = None,
         vad: Vad | None = None,
         clock: Callable[[], float] | None = None,
     ) -> None:
@@ -140,7 +150,6 @@ class CallOrchestrator:
         self._voices = voices
         self._sink = sink
         self._flush = flush
-        self._stt_config = stt_config
         self._vad = vad or EnergyVad()
         self._clock = clock or asyncio.get_event_loop().time
 
@@ -203,13 +212,7 @@ class CallOrchestrator:
 
     async def run(self, inbound: AsyncIterator[bytes]) -> None:
         """Answer, converse until the caller stops sending audio, then end."""
-        config = self._stt_config or SttConfig(
-            model="prisma-v3.0",
-            language_code="indic-auto",
-            sample_rate=self._config.sample_rate_in,
-            call_id=self._config.call_id,
-        )
-        session = await RotatingSttSession.open(self._stt, config)
+        session = await RotatingSttSession.open(self._stt, self._config.stt_config)
         self._session = session
 
         await self._set_state(CallState.HUMAN_CHECK, "answered")
@@ -360,12 +363,45 @@ class CallOrchestrator:
     # ---- speaking --------------------------------------------------------------------
 
     def _messages(self) -> list[ChatMessage]:
-        """The dialogue request: constraints, persona, then the recent conversation."""
+        """The dialogue request: constraints, persona, conversation, then who is speaking.
+
+        The relay shares one history, which is the point - the grandson has to know what his
+        grandfather was told. But the previous persona's replies sit in that history as
+        `assistant` turns, so to the model they read as *its own* earlier words, and it
+        continues them: on a real call the grandson's first line was Dada's line about
+        looking for his glasses.
+
+        So a handoff appends a note naming whose words those were. It goes last because the
+        instruction that has to win is the one closest to the generation.
+        """
         messages = [ChatMessage(role=Role.SYSTEM, content=persona_system_prompt(self._persona))]
-        for turn in recent_turns(self._turns, self._config.turn_budget):
+        window = recent_turns(self._turns, self._config.turn_budget)
+        for turn in window:
             role = Role.ASSISTANT if turn.speaker is Speaker.PERSONA else Role.USER
             messages.append(ChatMessage(role=role, content=turn.text))
+
+        if (note := self._handoff_note(window)) is not None:
+            messages.append(ChatMessage(role=Role.SYSTEM, content=note))
         return messages
+
+    def _handoff_note(self, window: Sequence[Turn]) -> str | None:
+        """Tell the current persona which of the replies above were somebody else's."""
+        others = [
+            turn.persona
+            for turn in window
+            if turn.speaker is Speaker.PERSONA
+            and turn.persona is not None
+            and turn.persona != self._persona.persona_id
+        ]
+        if not others:
+            return None
+        previous = profile_for(others[-1])
+        return (
+            f"The phone has just been handed to you. Any reply above that looks like yours "
+            f"was spoken by {previous.display_name}, not by you. Do not repeat his lines, do "
+            f"not continue his sentences, and do not borrow his mannerisms. Say briefly who "
+            f"you are and carry on in your own voice."
+        )
 
     async def _reply(self, latency: TurnLatency) -> None:
         """Generate and speak one persona turn."""
@@ -429,7 +465,7 @@ class CallOrchestrator:
         return self._rotations[persona.persona_id]
 
     def _tts_request(self, text: str) -> TtsRequest:
-        cleaned, dropped = sanitize_tags(text, self._persona.allowed_tags)
+        cleaned, dropped = sanitize_tags(tidy_for_speech(text), self._persona.allowed_tags)
         if dropped:
             # Billed and then discarded by the provider, so this is real money on silence.
             logger.info(
@@ -442,8 +478,8 @@ class CallOrchestrator:
         return TtsRequest(
             text=cleaned or text,
             voice=voice,
-            language="hi-en",
-            model="timbre-v3.0",
+            language=self._config.tts_language,
+            model=self._config.tts_model,
             sample_rate=self._config.sample_rate_out,
             call_id=self._config.call_id,
         )

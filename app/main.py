@@ -12,9 +12,12 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from app.api.deps import AppResources
-from app.api.routes import health
+from app.api.routes import health, simulator
+from app.api.routes.simulator import WEB_DIR
+from app.api.ws import call as call_ws
 from app.infra.budget import BudgetGuard
 from app.infra.db import create_engine, create_session_factory
 from app.infra.logging import configure_logging
@@ -119,6 +122,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = resolved
     app.include_router(health.router)
+    app.include_router(simulator.router)
+    app.include_router(call_ws.router)
+    app.mount("/static", StaticFiles(directory=str(WEB_DIR / "static")), name="static")
     return app
 
 

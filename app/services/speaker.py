@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from contextlib import aclosing
 
 import numpy as np
 
@@ -95,8 +96,14 @@ class PersonaSpeaker:
     async def _play(self, request: TtsRequest, profile: CallProfile) -> float | None:
         started = self._clock()
         pcm = bytearray()
-        async for chunk in self._tts.synthesize(request):
-            pcm.extend(chunk.pcm)
+        # `aclosing` rather than a bare `async for`: on a barge-in this task is cancelled
+        # mid-stream, and the generator's cleanup has to run *now* rather than whenever the
+        # garbage collector gets to it. Timbre allows one active request per key, so a stream
+        # left dangling makes the persona's next sentence fail with a 429 - which is exactly
+        # what happened on a real call before this was here.
+        async with aclosing(self._tts.synthesize(request)) as stream:
+            async for chunk in stream:
+                pcm.extend(chunk.pcm)
         if not pcm:
             raise ProviderError("synthesis produced no audio")
 

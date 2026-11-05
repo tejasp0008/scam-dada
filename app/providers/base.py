@@ -16,7 +16,7 @@ Two shapes here are driven by what Gnani's API actually does, not by preference:
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from enum import StrEnum
 from typing import Literal, Protocol, TypeVar
 
@@ -303,8 +303,14 @@ class TTSProvider(Protocol):
         """Vendor identifier used in logs and usage rows."""
         ...
 
-    def synthesize(self, request: TtsRequest) -> AsyncIterator[AudioChunk]:
-        """Yield PCM chunks as they are produced. First chunk latency is what matters."""
+    def synthesize(self, request: TtsRequest) -> AsyncGenerator[AudioChunk, None]:
+        """Yield PCM chunks as they are produced. First chunk latency is what matters.
+
+        An `AsyncGenerator` rather than an `AsyncIterator`, so the caller can close the
+        stream deterministically. That is not a stylistic preference: Timbre allows one
+        active request per API key, and barge-in abandons a stream mid-sentence, so the
+        caller *must* be able to close it before the next synthesis starts (DECISIONS 0023).
+        """
         ...
 
 

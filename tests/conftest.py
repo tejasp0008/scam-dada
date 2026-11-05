@@ -27,6 +27,9 @@ def settings() -> Settings:
         stt_provider=ProviderName.MOCK,
         tts_provider=ProviderName.MOCK,
         llm_provider=ProviderName.MOCK,
+        # No accounting in tests. Mock providers would otherwise write zero-credit rows into
+        # the same table that backs every credit figure in the README.
+        budget_enabled=False,
         _env_file=None,
     )
 
@@ -52,3 +55,20 @@ async def sqlite_sessions() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
         yield async_sessionmaker(engine, expire_on_commit=False)
     finally:
         await engine.dispose()
+
+
+@pytest.fixture
+async def call_client(
+    settings: Settings, sqlite_sessions: async_sessionmaker[AsyncSession]
+) -> AsyncIterator[TestClient]:
+    """A client whose persona voices are configured and whose writes go to SQLite.
+
+    The session factory is swapped after startup rather than configured, so the test never
+    touches the development database even when Docker happens to be running.
+    """
+    configured = settings.model_copy(
+        update={"persona_elder_voice": "Devansh", "persona_grandson_voice": "Devansh"}
+    )
+    with TestClient(create_app(configured)) as test_client:
+        test_client.app.state.resources.session_factory = sqlite_sessions  # type: ignore[attr-defined]
+        yield test_client

@@ -85,6 +85,18 @@ def guard(sqlite_sessions: async_sessionmaker[AsyncSession]) -> BudgetGuard:
     return make_guard(sqlite_sessions)[0]
 
 
+@pytest.fixture
+def disabled_guard(sqlite_sessions: async_sessionmaker[AsyncSession]) -> BudgetGuard:
+    return make_guard(sqlite_sessions, budget_enabled=False)[0]
+
+
+async def rows(guard: BudgetGuard) -> int:
+    """How many usage rows the guard has written."""
+    async with guard._session_factory() as session:
+        result = await session.execute(select(func.count()).select_from(ApiUsage))
+        return int(result.scalar_one())
+
+
 async def test_a_call_within_the_ceiling_is_allowed(guard: BudgetGuard) -> None:
     await guard.check("tts", guard.cost.price_tts(50))
 
@@ -216,3 +228,22 @@ def test_counter_keys_are_namespaced() -> None:
 def test_the_cost_model_is_reachable_from_the_guard(guard: BudgetGuard) -> None:
     """Adapters price through the guard, so they never hold a rate themselves."""
     assert isinstance(guard.cost, CostModel)
+
+
+class TestDisabledGuard:
+    """`BUDGET_ENABLED=false` means no accounting, not merely no enforcement.
+
+    Tests run with mock providers against whatever database is configured. A guard that
+    still wrote rows would put invented usage into the table that backs every credit figure
+    in the README, and a ledger with invented rows in it is not a measurement.
+    """
+
+    async def test_it_records_nothing(self, disabled_guard: BudgetGuard) -> None:
+        await disabled_guard.record(
+            "mock-tts", disabled_guard.cost.price_tts(1000), call_id="call-1"
+        )
+        assert await rows(disabled_guard) == 0
+
+    async def test_it_enforces_nothing(self, disabled_guard: BudgetGuard) -> None:
+        charge = disabled_guard.cost.price_tts(10_000_000)
+        await disabled_guard.check("mock-tts", charge)  # would raise if enforced
