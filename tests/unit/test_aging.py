@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 
@@ -287,3 +289,41 @@ class TestJitter:
             tremble(
                 sine(440.0, 0.1), RATE, rate_hz=5.0, am_depth=0.1, vibrato_cents=0.0, jitter=2.0
             )
+
+
+class TestYoungPreset:
+    """Not an ageing preset. It exists so two personas can share one Timbre voice."""
+
+    def test_it_pushes_pitch_and_rate_the_other_way(self) -> None:
+        young = PRESETS_BY_NAME["young"]
+        assert young.pitch > 1.0
+        assert young.speed > 1.0
+
+    def test_it_does_not_tremble_or_breathe(self) -> None:
+        """He is 27 and he is the crisp one; that contrast is the point of the relay."""
+        young = PRESETS_BY_NAME["young"]
+        assert young.tremble_depth == 0.0
+        assert young.vibrato_cents == 0.0
+        assert young.inhale_ms == 0.0
+
+    def test_it_raises_the_fundamental(self) -> None:
+        out = PRESETS_BY_NAME["young"].apply(sine(200.0, 1.0), RATE)
+        assert dominant_hz(out) > 205.0
+
+    def test_it_shortens_the_clip(self) -> None:
+        voice = sine(200.0, 1.0)
+        assert PRESETS_BY_NAME["young"].apply(voice, RATE).size < voice.size
+
+    def test_it_is_more_than_two_semitones_from_the_elder(self) -> None:
+        """Roughly where two adult male voices stop sounding like one voice.
+
+        Measured on the real Devansh render: 133.3 Hz against 151.9 Hz, +2.26 semitones,
+        with the grandson 20% faster. Against `classic` or bare `none` the gap was 1.6
+        semitones, which is inside one speaker's own range.
+        """
+        gap = 12 * math.log2(PRESETS_BY_NAME["young"].pitch / PRESETS_BY_NAME["frail"].pitch)
+        assert gap > 2.0
+
+    def test_a_pitch_beyond_the_declared_ceiling_is_refused(self) -> None:
+        with pytest.raises(ValueError):
+            AgingPreset(name="chipmunk", pitch=1.6, speed=1.0)

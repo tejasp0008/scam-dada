@@ -615,3 +615,55 @@ whitespace-insensitively, and fails at startup rather than halfway through a rec
 
 **The grandson's audition uses his own line,** not Dada's. Judging a 27-year-old on a line
 that opens with `<slow>` would have been judging the tag, not the voice.
+
+## 0022 — Both personas are Devansh, pushed in opposite directions
+*2026-11-05 · Phase 1.5*
+
+Chosen by ear: Devansh for the grandson too. That collided with the startup guard added in
+0021, which refused one voice for both personas. **The guard was too blunt and has been
+replaced**, because "different Timbre voice" is the wrong test for "the scammer can tell
+somebody else picked up the phone".
+
+**Sharing a voice is legitimate, and arguably better.** Relatives share vocal timbre — a
+grandfather and grandson who sound related is more plausible than two unrelated strangers
+living in one house. What matters is not the catalogue entry but the *rendered* voice.
+`relay_collision` now refuses only the case that is genuinely broken: the same voice with the
+same ageing, which is one man pretending to hand the phone to himself.
+
+**But the gap as chosen was too narrow, and that needed measuring rather than assuming.**
+Controlled comparison — the same cached synthesis through both profiles, so only the
+processing differs:
+
+| | median F0 | duration |
+|---|---|---|
+| as the grandson (`none`) | 145.9 Hz | 14.3 s |
+| as Dada (`frail`) | 133.3 Hz | 16.7 s |
+
+That is **1.56 semitones** and 16% slower. Audible, but 1.6 semitones is comfortably inside
+one speaker's own range, and a scammer ten minutes into a call has had a lot of exposure to
+the voice. (A first attempt measured F0 on the actual handoff clip and got Dada *higher* than
+the grandson — the two halves read different sentences, and intonation swamped a 9% shift.
+Only the controlled comparison answers the question.)
+
+**So the grandson is pushed the other way.** A new `young` preset — `pitch=1.05`,
+`speed=1.08`, no tremble, no breath — which is not an ageing preset and says so. Remeasured:
+
+| | median F0 | duration |
+|---|---|---|
+| grandson (`young`) | 151.9 Hz | 13.3 s |
+| Dada (`frail`) | 133.3 Hz | 16.7 s |
+
+**+2.26 semitones, grandson 20% faster.** Two semitones is roughly where two adult male
+voices stop sounding like one voice, so this clears it rather than sitting on it. The
+`AgingPreset.pitch` ceiling moved from 1.0 to 1.15 to allow it, documented as being for
+distinguishing a younger relative and not for ageing anyone.
+
+**`--handoff` renders the thing that actually answers the question.** Dada's line and the
+grandson's line back to back in one clip, with the room tone continuous across the join
+because the bed is read positionally — `bed_offset` for the second utterance is the sample
+count of the first. Two clips side by side in a file browser do not answer it; the scammer
+hears one unbroken line. Verified numerically: the step across the join is 0.0034 against a
+99.9th-percentile step of 0.112, so there is no click, and the bed sits at 0.0219 before the
+join and 0.0187 after.
+
+Rendering the handoff cost nothing — both lines were already cached.

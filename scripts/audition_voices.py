@@ -112,6 +112,12 @@ def main() -> int:
         help="render every voice through one profile, to compare voices on equal terms",
     )
     parser.add_argument(
+        "--handoff",
+        action="store_true",
+        help="render Dada and then the grandson back to back in one clip, with the room tone "
+        "running continuously across the join - the handoff as the scammer hears it",
+    )
+    parser.add_argument(
         "--grandson",
         action="store_true",
         help="audition the grandson instead: his own line, his tag vocabulary, unaged, on "
@@ -144,8 +150,11 @@ def main() -> int:
     if not settings.gnani_api_key:
         print("GNANI_API_KEY is not set in .env", file=sys.stderr)
         return 2
-    if not args.ladder and not args.aged and not args.bed_db and not args.grandson:
-        print("nothing to do: pass --ladder, --aged, --bed-db or --grandson", file=sys.stderr)
+    if not any((args.ladder, args.aged, args.bed_db, args.grandson, args.handoff)):
+        print(
+            "nothing to do: pass --ladder, --aged, --bed-db, --grandson or --handoff",
+            file=sys.stderr,
+        )
         return 2
     if args.profile not in PROFILES_BY_NAME:
         print(f"unknown profile {args.profile!r}; have {sorted(PROFILES_BY_NAME)}", file=sys.stderr)
@@ -156,7 +165,7 @@ def main() -> int:
 
     if args.voices:
         voices = tuple(v.strip() for v in args.voices.split(",") if v.strip())
-    elif args.aged or args.grandson:
+    elif args.aged or args.grandson or args.handoff:
         voices = MALE_VOICES if args.male else FEMALE_VOICES
     else:
         voices = (LEAD_VOICE,)
@@ -174,6 +183,10 @@ def main() -> int:
 
     ladder = tuple(_with_room(p, args.room) for p in CALL_PROFILES) if args.ladder else ()
     chosen = _with_room(PROFILES_BY_NAME[args.profile], args.room) if args.aged else None
+    if args.handoff:
+        args.out.mkdir(parents=True, exist_ok=True)
+        return asyncio.run(_handoff(settings, voices, args.room, args.out))
+
     grandson = _with_room(GRANDSON_PROFILE, args.room) if args.grandson else None
     sweep: tuple[CallProfile, ...] = ()
     if levels:
@@ -362,6 +375,95 @@ async def _run(
         f"{' (estimated rates)' if status.estimated else ''}"
     )
     return 0 if not failed else 1
+
+
+async def _handoff(settings: Settings, voices: tuple[str, ...], room: str | None, out: Path) -> int:
+    """Render Dada, then the grandson, as one continuous call.
+
+    This is the only way to judge whether two personas are distinguishable, and the only way
+    to judge it at all if they share a Timbre voice. Listening to two clips in a file browser
+    does not answer the question - the scammer hears one unbroken line.
+
+    The room tone is continuous across the join because the bed is read positionally: the
+    second utterance starts reading the loop exactly where the first stopped. Rendering each
+    utterance from bed offset zero would restart the fan mid-call, which is the giveaway that
+    `AmbienceBed.take` taking an offset exists to prevent.
+    """
+    elder_profile = _with_room(PROFILES_BY_NAME[DEFAULT_ELDER_PROFILE], room)
+    grandson_profile = _with_room(GRANDSON_PROFILE, room)
+    elder_text, _ = sanitize_tags(AUDITION_LINE, ELDER_TAGS)
+    grandson_text, _ = sanitize_tags(GRANDSON_LINE, GRANDSON_TAGS)
+
+    print(f"Elder    : {_describe(elder_profile)}")
+    print(f"Grandson : {_describe(grandson_profile)}")
+    if elder_profile.aging.name == grandson_profile.aging.name:
+        print("WARNING: both personas use the same ageing; the handoff will be inaudible")
+
+    engine = create_engine(settings)
+    sessions = create_session_factory(engine)
+    redis = create_redis(settings)
+    budget = BudgetGuard(redis, sessions, settings)
+    bed = AmbienceBed(elder_profile.ambience, SAMPLE_RATE) if elder_profile.ambience else None
+
+    async with httpx.AsyncClient() as client:
+        tts = CachingTTS(
+            GnaniTimbreTTS(
+                api_key=settings.gnani_api_key,
+                sse_url=settings.gnani_tts_sse_url,
+                model=settings.tts_model,
+                language=settings.tts_language,
+                client=client,
+                usage=budget,
+                read_timeout=60.0,
+            ),
+            settings.tts_cache_dir,
+            usage=budget,
+        )
+        for voice in voices:
+            pieces: list[np.ndarray] = []
+            offset = 0
+            for profile, line, who in (
+                (elder_profile, elder_text, "dada"),
+                (grandson_profile, grandson_text, "grandson"),
+            ):
+                pcm = bytearray()
+                async for chunk in tts.synthesize(
+                    TtsRequest(
+                        text=line,
+                        voice=voice,
+                        language=settings.tts_language,
+                        model=settings.tts_model,
+                        sample_rate=SAMPLE_RATE,
+                    )
+                ):
+                    pcm.extend(chunk.pcm)
+                result = profile.render(
+                    pcm_to_float32(bytes(pcm)),
+                    SAMPLE_RATE,
+                    bed=bed,
+                    bed_offset=offset,
+                    lead_ms=LEAD_MS,
+                )
+                pieces.append(result.audio)
+                offset += result.audio.size
+                print(
+                    f"  {voice:10} {who:9} {result.seconds:4.1f}s  "
+                    f"{result.dropped_packets} pkt lost"
+                )
+            path = out / f"{voice.lower()}.handoff.wav"
+            seconds = _write(path, np.concatenate(pieces), SAMPLE_RATE)
+            print(f"  {voice:10} {'joined':9} {seconds:4.1f}s  {path.name}")
+
+    status = await budget.status(BillingPool.GNANI)
+    await redis.aclose()
+    await engine.dispose()
+    print(f"\nTimbre: {tts.misses} synthesised, {tts.hits} served from cache")
+    print(f"\nListen:\n  open {out}/")
+    print(
+        f"\nGnani pool now at {status.spent:.4f} credits of a {status.stop_at:g} hard stop"
+        f"{' (estimated rates)' if status.estimated else ''}"
+    )
+    return 0
 
 
 if __name__ == "__main__":

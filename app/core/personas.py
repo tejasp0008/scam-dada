@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.core.audio.call_profile import DEFAULT_ELDER_PROFILE, GRANDSON_PROFILE
+from app.core.audio.call_profile import DEFAULT_ELDER_PROFILE, GRANDSON_PROFILE, PROFILES_BY_NAME
 from app.core.models import PersonaId
 from app.core.tags import ELDER_TAGS, GRANDSON_TAGS, TIMBRE_V3_TAGS
 
@@ -102,3 +102,34 @@ def next_in_relay(current: PersonaId | None) -> PersonaProfile | None:
     if index + 1 >= len(RELAY):
         return None
     return RELAY[index + 1]
+
+
+def relay_collision(voices: dict[PersonaId, str]) -> str | None:
+    """Explain why a voice assignment would make the relay inaudible, or return None.
+
+    The relay only works because the scammer hears somebody else pick up the phone, so two
+    personas have to be told apart. But "different Timbre voice" is the wrong test for that.
+
+    **The same voice for both is legitimate** when their call profiles age them differently.
+    Relatives share vocal timbre - a grandfather and grandson sounding related is more
+    plausible than two unrelated strangers in one house - and Dada is pitched down 9%, slowed
+    15%, given a tremble and a breath, which is a larger change than the gap between most
+    pairs of voices in the catalogue.
+
+    **What is never allowed is the same voice with the same ageing.** That is one person
+    pretending to hand the phone to himself, and no prompt difference covers it.
+    """
+    rendered: dict[tuple[str, str], PersonaId] = {}
+    for persona_id, voice in voices.items():
+        name = voice.strip().casefold()
+        if not name:
+            continue  # voices are chosen by ear over several sessions; half-configured is normal
+        profile = PROFILES_BY_NAME[profile_for(persona_id).call_profile]
+        key = (name, profile.aging.name)
+        if (clash := rendered.get(key)) is not None:
+            return (
+                f"{persona_id.value} and {clash.value} would both be {voice!r} with the "
+                f"{profile.aging.name!r} ageing, so the relay handoff is inaudible"
+            )
+        rendered[key] = persona_id
+    return None

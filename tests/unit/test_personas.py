@@ -8,12 +8,13 @@ that fails this suite until someone updates the constant on purpose.
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
 
+from app.core import personas
 from app.core.audio.call_profile import PROFILES_BY_NAME
 from app.core.models import PersonaId
 from app.core.personas import (
@@ -23,6 +24,7 @@ from app.core.personas import (
     PersonaProfile,
     next_in_relay,
     profile_for,
+    relay_collision,
 )
 from app.core.tags import TIMBRE_V3_TAGS
 from app.infra.settings import Settings
@@ -79,12 +81,17 @@ class TestProfiles:
     def test_the_call_profile_named_actually_exists(self, profile: PersonaProfile) -> None:
         assert profile.call_profile in PROFILES_BY_NAME
 
-    def test_the_elder_is_aged_and_the_grandson_is_not(self) -> None:
-        """Timbre has no elderly voice, and a 27-year-old does not need one."""
+    def test_the_two_personas_are_pushed_in_opposite_directions(self) -> None:
+        """Timbre has no elderly voice, and when both personas share one Timbre voice the
+        grandson has to be pushed the other way or the handoff is one man talking to himself.
+        """
         elder = PROFILES_BY_NAME[profile_for(PersonaId.DADA).call_profile]
         grandson = PROFILES_BY_NAME[profile_for(PersonaId.GRANDSON).call_profile]
-        assert elder.aging.name != "none"
-        assert grandson.aging.name == "none"
+        assert elder.aging.pitch < 1.0 < grandson.aging.pitch
+        assert elder.aging.speed < 1.0 < grandson.aging.speed
+        # Two semitones is roughly where two adult male voices stop being one voice.
+        semitones = 12 * math.log2(grandson.aging.pitch / elder.aging.pitch)
+        assert semitones > 2.0
 
     def test_both_personas_are_in_the_same_room_on_the_same_line(self) -> None:
         """They are passing one handset between them, so the room cannot change."""
@@ -172,14 +179,42 @@ class TestVoiceConfiguration:
         settings = self._settings("Devansh", "Prakash")
         assert settings.persona_elder_voice == "Devansh"
 
-    def test_the_same_voice_twice_is_refused(self) -> None:
-        with pytest.raises(ValidationError, match="two different voices"):
-            self._settings("Devansh", "Devansh")
+    def test_one_voice_for_both_personas_is_allowed_when_the_ageing_differs(self) -> None:
+        """Relatives share vocal timbre, and Dada is pitched down 9% and slowed 15%.
 
-    def test_the_check_ignores_case_and_padding(self) -> None:
-        """Because `.env` is hand-edited and ' Devansh' is the same voice as 'devansh'."""
-        with pytest.raises(ValidationError, match="two different voices"):
-            self._settings("Devansh", " devansh ")
+        A bigger change than the gap between most pairs in the catalogue, so this is a
+        legitimate configuration rather than a mistake to be blocked.
+        """
+        settings = self._settings("Devansh", "Devansh")
+        assert settings.persona_grandson_voice == "Devansh"
+
+    def test_the_relay_is_checked_on_the_rendered_voice_not_the_timbre_voice(self) -> None:
+        elder = PROFILES_BY_NAME[profile_for(PersonaId.DADA).call_profile]
+        grandson = PROFILES_BY_NAME[profile_for(PersonaId.GRANDSON).call_profile]
+        assert elder.aging.name != grandson.aging.name
+        assert relay_collision({PersonaId.DADA: "Devansh", PersonaId.GRANDSON: "Devansh"}) is None
+
+    def test_the_same_voice_with_the_same_ageing_is_refused(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One person pretending to hand the phone to himself. No prompt covers that.
+
+        The shipped relay cannot reach this state - which is the point - so the registry is
+        patched to put both personas on the unaged profile.
+        """
+        unaged = profile_for(PersonaId.GRANDSON).call_profile
+        monkeypatch.setitem(
+            personas._BY_ID,
+            PersonaId.DADA,
+            profile_for(PersonaId.DADA).model_copy(update={"call_profile": unaged}),
+        )
+        reason = relay_collision({PersonaId.DADA: "Devansh", PersonaId.GRANDSON: "Devansh"})
+        assert reason is not None
+        assert "inaudible" in reason
+
+    def test_a_voice_name_is_compared_without_case_or_padding(self) -> None:
+        """`.env` is hand-edited, and ' devansh ' is the same voice as 'Devansh'."""
+        assert relay_collision({PersonaId.DADA: "Devansh", PersonaId.GRANDSON: " devansh "}) is None
 
     def test_an_unset_voice_does_not_trip_the_check(self) -> None:
         """Voices are chosen by ear over several sessions, so half-configured is normal."""

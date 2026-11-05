@@ -84,8 +84,7 @@ class TestRegistry:
         CallProfile later cannot quietly diverge between the two personas.
         """
         elder = PROFILES_BY_NAME[DEFAULT_ELDER_PROFILE]
-        assert GRANDSON_PROFILE.aging.name == "none"
-        assert elder.aging.name != "none"
+        assert GRANDSON_PROFILE.aging != elder.aging
         rejoined = GRANDSON_PROFILE.model_copy(update={"name": elder.name, "aging": elder.aging})
         assert rejoined == elder
 

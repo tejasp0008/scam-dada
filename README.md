@@ -30,10 +30,10 @@ Built for the Great Indian AI Internship Challenge on Gnani's speech models.
 | **Phone line** | Handset presence bump, carrier AGC, 8 kHz narrowband, G.711 mu-law companding, packet loss with concealment |
 | **Call profiles** | The three stages composed in the one order that is physically correct, as a six-rung ladder from `studio` to `bad-line` |
 | **Voice-to-room ratio** | Referenced to speech level, and equalised across lines so the *delivered* ratio (~10.5 dB measured) does not change when the line does |
-| **Persona voices** | Dada is Devansh on `bad-line`; the grandson is derived from the same profile so the room and carrier cannot change when the handset does. Startup fails if both personas are given one voice |
+| **Persona voices** | Both personas are Devansh on `bad-line` — relatives share timbre — pushed apart in processing to +2.26 semitones and 20% in rate. Startup fails only if two personas would render *identically* |
 | **Audio tags** | The 13-tag Timbre v3.0 catalogue, with a per-persona allowed set; unknown tags are billed and then discarded by the API, so they are stripped first |
 | **Personas** | Dada and grandson prompts, ethics block shared and digest-pinned, relay registry |
-| Tests | 391 offline + 64 contract, `ruff` and `mypy` clean (`mypy --strict` on `core` and `providers`) |
+| Tests | 401 offline + 64 contract, `ruff` and `mypy` clean (`mypy --strict` on `core` and `providers`) |
 
 Measured on the live APIs by `make smoke` (n=1 per provider, 2026-11-04):
 
@@ -132,7 +132,7 @@ cp .env.example .env     # then fill in GNANI_API_KEY and the LLM_* values
 make install             # venv on 3.11 + dev dependencies
 make up                  # postgres + redis
 make migrate             # apply the baseline schema
-make test                # 391 tests, offline, zero API cost
+make test                # 401 tests, offline, zero API cost
 make dev                 # api on http://localhost:8000
 ```
 
@@ -157,7 +157,8 @@ surprise on stage.
 | `make audition` | **Spends credits.** One line in every Timbre v3.0 voice. `ARGS="--male"` for the male set |
 | `make audition-male` | **Spends credits** (6 requests). Every male voice at Dada's chosen profile, to compare voices |
 | `make audition-ladder` | 1 request, or free from cache. One voice through all six realism profiles, to choose a profile |
-| `python scripts/audition_voices.py --male --grandson` | **Spends credits** (6 requests). The grandson's own line in every male voice, unaged, on Dada's room and line |
+| `python scripts/audition_voices.py --male --grandson` | **Spends credits** (6 requests). The grandson's own line in every male voice, on Dada's room and line |
+| `python scripts/audition_voices.py --voices Devansh --handoff` | Free from cache. Dada then the grandson in one clip, room tone continuous across the join — the only way to judge whether the relay reads as two people |
 | `make lint` / `make fmt` / `make types` | `ruff` and `mypy` |
 | `make check` | Everything that gates a phase |
 | `make revision m="..."` | Autogenerate a migration |
@@ -226,6 +227,10 @@ real limit.
   delivers 8.2 dB; on `bad-line` the same figure delivers 3.7 dB. The nominal levels
   therefore differ *in order to* equalise the delivered ratio at ~10.5 dB. Only measured
   figures are quoted anywhere, and tests pin the relationship (DECISIONS 0020, 0021).
+- **Both personas share one Timbre voice.** Deliberate — relatives sound related — but the
+  separation is 2.26 semitones and 20% in speaking rate, which is measured rather than
+  generous. If a listener ever reports hearing one person, the fix is a second voice for the
+  grandson, not more processing (DECISIONS 0022).
 - **`bad-line` is the aggressive end of the ladder, chosen deliberately.** A bad connection
   masks synthesis artefacts and forces the scammer to repeat himself, which is the goal —
   but it also gives him a reason to call back on a better line. That is hang-up risk, and

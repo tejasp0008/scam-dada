@@ -252,16 +252,16 @@ DEFAULT_ELDER_PROFILE = "bad-line"
 
 _ELDER = {profile.name: profile for profile in CALL_PROFILES}[DEFAULT_ELDER_PROFILE]
 
-#: The grandson is 27, so he is not aged — but he is standing in the same room and he is
-#: holding the same handset, and neither the room nor the carrier can change when a phone is
-#: passed from one hand to another.
+#: The grandson is 27, so he is pushed the other way — but he is standing in the same room and
+#: he is holding the same handset, and neither the room nor the carrier can change when a
+#: phone is passed from one hand to another.
 #:
 #: Derived from the elder's profile rather than written out, so the two cannot drift apart.
 #: Spelling it out separately is how the grandson ended up on a landline while Dada was on a
 #: poor mobile connection: the handoff would have audibly changed the line quality, which is
 #: a tell in the one moment of the call that is meant to be seamless. A test now pins that the
 #: only difference between them is the ageing.
-GRANDSON_PROFILE = _ELDER.model_copy(update={"name": "grandson", "aging": _aging("none")})
+GRANDSON_PROFILE = _ELDER.model_copy(update={"name": "grandson", "aging": _aging("young")})
 
 PROFILES_BY_NAME: dict[str, CallProfile] = {
     profile.name: profile for profile in (*CALL_PROFILES, GRANDSON_PROFILE)

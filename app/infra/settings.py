@@ -12,6 +12,8 @@ from pydantic import Field, PostgresDsn, RedisDsn, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.cost import CostModel
+from app.core.models import PersonaId
+from app.core.personas import relay_collision
 from app.providers.names import ProviderName
 
 
@@ -63,20 +65,22 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _personas_must_sound_different(self) -> Settings:
-        """Refuse to start with one voice for both personas.
+        """Refuse to start if two personas would render to the same voice.
 
-        The family relay works because the scammer hears a different person take the phone.
-        Two personas on one voice is not a degraded demo, it is a broken one, and it is an
-        easy mistake to make by copying a line in `.env`. Better to fail at startup than
-        halfway through a recorded call.
+        The relay works because the scammer hears somebody else take the phone, and that is
+        worth failing at startup over rather than discovering halfway through a recorded call.
+        The test is on the *rendered* voice, not the Timbre voice: sharing a voice is fine
+        when the call profiles age the two personas differently, which is how a grandfather
+        and grandson end up plausibly related. See `app.core.personas.relay_collision`.
         """
-        elder = self.persona_elder_voice.strip().casefold()
-        grandson = self.persona_grandson_voice.strip().casefold()
-        if elder and grandson and elder == grandson:
-            raise ValueError(
-                "PERSONA_ELDER_VOICE and PERSONA_GRANDSON_VOICE are both "
-                f"{self.persona_elder_voice!r}; the relay needs two different voices"
-            )
+        reason = relay_collision(
+            {
+                PersonaId.DADA: self.persona_elder_voice,
+                PersonaId.GRANDSON: self.persona_grandson_voice,
+            }
+        )
+        if reason is not None:
+            raise ValueError(f"{reason}. Set PERSONA_ELDER_VOICE / PERSONA_GRANDSON_VOICE")
         return self
 
     # Evon is not on Gnani's API platform, so the LLM is always OpenAI-compatible.

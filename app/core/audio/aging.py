@@ -271,7 +271,14 @@ class AgingPreset(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     name: str
-    pitch: float = Field(default=1.0, gt=0.5, le=1.0, description="0.94 is ~1 semitone down.")
+    pitch: float = Field(
+        default=1.0,
+        gt=0.5,
+        le=1.15,
+        description="0.94 is ~1 semitone down. Values above 1.0 do not age anyone - they "
+        "exist so a younger relative can be pushed away from the elder when both personas "
+        "share one Timbre voice.",
+    )
     speed: float = Field(default=1.0, gt=0.5, le=1.5, description="0.9 is 10% slower.")
     tremble_hz: float = Field(default=5.0, ge=0.0, le=20.0)
     tremble_depth: float = Field(default=0.0, ge=0.0, le=1.0, description="AM depth.")
@@ -362,6 +369,11 @@ AGING_PRESETS: tuple[AgingPreset, ...] = (
         inhale_ms=460.0,
         inhale_level=0.11,
     ),
+    # Not an ageing preset. A 27-year-old nudged up and quickened, so that when he shares a
+    # Timbre voice with his grandfather the two are still two people: measured against
+    # `frail` this widens the gap from 1.6 to 2.4 semitones and the rate difference from
+    # 16% to 26%. No tremble and no breath - he is the crisp one.
+    AgingPreset(name="young", pitch=1.05, speed=1.08, jitter=0.0),
 )
 
 PRESETS_BY_NAME: dict[str, AgingPreset] = {preset.name: preset for preset in AGING_PRESETS}
