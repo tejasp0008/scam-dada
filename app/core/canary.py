@@ -27,6 +27,14 @@ transcript is also matched in a *de-spoken* form, where "at" becomes `@`, "dot" 
 spelled-out digits become digits, and "double"/"triple" are expanded. Verified against a real
 call rather than assumed.
 
+**The name in a handle is not reliable; the digits are.** A second live call leaked
+`sushila.7204@demo` and was missed because Prisma transcribed the spoken name as "susheela" -
+the same name, a different transliteration, which DECISIONS 0009 already recorded as
+unstable. The digit tag in a canary handle comes from the call id, transcribes reliably when
+spoken digit by digit, and is what actually distinguishes one canary from another. So a
+handle also matches on `<digits>@<provider>`, scored below an exact match because the name
+spelling disagreed.
+
 **Matching is token-level and deliberately conservative.** A false positive here is a claim
 that two criminals share infrastructure, which is the strongest thing the dashboard says.
 The identifier fields are matched exactly after normalisation; names are matched on surname
@@ -234,6 +242,20 @@ def _normalise(text: str) -> str:
     return re.sub(r"[\s.-]+", "", text).casefold()
 
 
+def handle_fingerprint(handle: str) -> str | None:
+    """The transliteration-independent part of a UPI handle: its digits and its provider.
+
+    `sushila.7204@demo` fingerprints as `7204@demo`. Returns None when a handle carries no
+    digits, because then there is nothing stable left to match on and a provider alone would
+    fire on every canary ever issued.
+    """
+    if "@" not in handle:
+        return None
+    local, _, provider = handle.rpartition("@")
+    digits = "".join(char for char in local if char.isdigit())
+    return f"{digits}@{provider}".casefold() if digits else None
+
+
 def _tokens(text: str) -> set[str]:
     return {token.casefold() for token in re.findall(r"[A-Za-z]{3,}", text)}
 
@@ -270,6 +292,26 @@ def find_matches(
                         matched_field=field,
                         matched_text=value,
                         score=score,
+                    )
+                )
+
+        # The handle's digits, for when the name came back spelled differently. Only
+        # checked if the exact match above did not already fire, so one leak is one row.
+        if not any(
+            m.identity_id == identity.identity_id and m.matched_field == "upi_handle"
+            for m in matches
+        ):
+            fingerprint = handle_fingerprint(identity.upi_handle)
+            if fingerprint and _normalise(fingerprint) in spoken:
+                matches.append(
+                    CanaryMatch(
+                        identity_id=identity.identity_id,
+                        issued_call_id=call_id,
+                        matched_field="upi_handle",
+                        matched_text=identity.upi_handle,
+                        # Below one: the digits and the provider matched but the name's
+                        # spelling did not, which is one fewer corroborating field.
+                        score=0.9,
                     )
                 )
 

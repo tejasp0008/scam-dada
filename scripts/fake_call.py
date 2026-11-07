@@ -142,6 +142,11 @@ async def run_call(url: str, lines: list[np.ndarray], out: Path) -> int:
     flushes = 0
     call_id = ""
     last_audio = 0.0
+    # (offset in seconds from the start of the call, audio). Recorded for both sides so the
+    # whole conversation can be laid back onto one timeline afterwards. The persona-only
+    # file is a recording of half a phone call; this is the call.
+    timeline: list[tuple[float, np.ndarray, str]] = []
+    call_started = 0.0
 
     async with websockets.connect(url, max_size=None) as socket:
 
@@ -151,6 +156,7 @@ async def run_call(url: str, lines: list[np.ndarray], out: Path) -> int:
                 if isinstance(message, bytes):
                     received.extend(message)
                     last_audio = time.monotonic()
+                    timeline.append((last_audio - call_started, pcm_to_float32(message), "persona"))
                     continue
                 payload = json.loads(message)
                 kind = payload.get("type")
@@ -174,6 +180,7 @@ async def run_call(url: str, lines: list[np.ndarray], out: Path) -> int:
 
         reader = asyncio.create_task(listen())
         silence = float32_to_pcm(np.zeros(FRAME_SAMPLES, dtype=np.float32))
+        call_started = time.monotonic()
 
         async def hold(seconds: float) -> None:
             """Send silence for `seconds`, keeping the line open and the VAD fed."""
@@ -183,6 +190,7 @@ async def run_call(url: str, lines: list[np.ndarray], out: Path) -> int:
 
         for index, line in enumerate(lines, start=1):
             print(f"  -> scammer line {index}/{len(lines)}")
+            timeline.append((time.monotonic() - call_started, line, "caller"))
             for frame in frames(line):
                 await socket.send(frame)
                 # Real time, because the whole loop is timing: the VAD, the barge-in window
@@ -208,6 +216,8 @@ async def run_call(url: str, lines: list[np.ndarray], out: Path) -> int:
         path = out / f"{name}.persona.wav"
         path.write_bytes(pcm_to_wav(bytes(received), 24000))
         print(f"\nPersona audio: {len(received) / 2 / 24000:.1f}s -> {path}")
+    if timeline:
+        _write_conversation(timeline, out, name)
     (out / f"{name}.events.json").write_text(json.dumps(events, indent=2))
 
     def of(kind: str) -> list[dict[str, object]]:
@@ -234,6 +244,108 @@ async def run_call(url: str, lines: list[np.ndarray], out: Path) -> int:
         print("\nNo persona audio came back.", file=sys.stderr)
         return 1
     return 0
+
+
+#: A gap longer than this between persona chunks starts a new utterance. The server sends a
+#: sentence as a burst of 60 ms slices, so the gaps *within* an utterance are milliseconds
+#: and the gaps *between* them are the LLM and the synthesiser - hundreds at least.
+UTTERANCE_GAP_SECONDS = 0.35
+
+
+def _group_persona(
+    pieces: list[tuple[float, np.ndarray]], rate: int
+) -> list[tuple[float, np.ndarray]]:
+    """Reassemble persona chunks into utterances laid down contiguously.
+
+    This is the correction that makes the recording honest. The server pushes a sentence as
+    fast as the socket accepts it, so chunk *arrival* times cluster - placing each chunk at
+    its own arrival offset stacks a sentence on top of itself. What the listener actually
+    hears is the browser's ring buffer playing those chunks back to back, so an utterance is
+    laid down contiguously from the moment its first chunk arrived.
+    """
+    grouped: list[tuple[float, np.ndarray]] = []
+    current: list[np.ndarray] = []
+    start = 0.0
+    previous = 0.0
+
+    for offset, audio in pieces:
+        if current and offset - previous > UTTERANCE_GAP_SECONDS:
+            grouped.append((start, np.concatenate(current)))
+            current = []
+        if not current:
+            start = offset
+        current.append(audio)
+        previous = offset
+    if current:
+        grouped.append((start, np.concatenate(current)))
+    return grouped
+
+
+def _fit(track: np.ndarray, ceiling: float = 0.95) -> float:
+    """Scale factor that brings a track under `ceiling`, never above 1.0.
+
+    Only ever attenuates. Normalising upwards would hide a persona that is genuinely too
+    quiet against the caller, and the relative level of the two sides is part of what is
+    being reviewed.
+    """
+    peak = float(np.max(np.abs(track))) if track.size else 0.0
+    return min(1.0, ceiling / peak) if peak > ceiling else 1.0
+
+
+def _write_conversation(
+    timeline: list[tuple[float, np.ndarray, str]], out: Path, name: str
+) -> None:
+    """Lay both sides of the call back onto one timeline and write it out.
+
+    Two files, because they answer different questions:
+
+    * **mono** is what the call sounded like, and what goes into a demo video.
+    * **stereo** puts the caller left and the persona right, which is the only practical way
+      to review who interrupted whom - and barge-in is the thing most worth reviewing.
+
+    Offsets are wall-clock from the start of the call, which is the right clock: the point of
+    this project is how much of a scammer's real time was consumed, and a timeline built from
+    audio lengths alone would silently delete every silence.
+    """
+    rate = 24000
+    caller_pieces = [
+        (offset, resample_linear(audio, WIRE_RATE, rate))
+        for offset, audio, who in timeline
+        if who == "caller"
+    ]
+    persona_pieces = _group_persona(
+        [(offset, audio) for offset, audio, who in timeline if who == "persona"], rate
+    )
+    if not caller_pieces and not persona_pieces:
+        return
+
+    everything = [(o, a) for o, a in caller_pieces] + [(o, a) for o, a in persona_pieces]
+    total = max(int((offset + audio.size / rate) * rate) for offset, audio in everything) + rate
+    caller = np.zeros(total, dtype=np.float32)
+    persona = np.zeros(total, dtype=np.float32)
+
+    for track, pieces in ((caller, caller_pieces), (persona, persona_pieces)):
+        for offset, audio in pieces:
+            start = max(0, int(offset * rate))
+            end = min(total, start + audio.size)
+            track[start:end] += audio[: end - start]
+
+    # One factor for both tracks, derived from the mix, so no sample clips and the balance
+    # between the two sides is preserved exactly.
+    gain = _fit(caller + persona)
+    mono_path = out / f"{name}.call.wav"
+    mono_path.write_bytes(pcm_to_wav(float32_to_pcm((caller + persona) * gain), rate))
+
+    interleaved = np.empty(total * 2, dtype=np.float32)
+    interleaved[0::2] = caller * gain
+    interleaved[1::2] = persona * gain
+    stereo_path = out / f"{name}.stereo.wav"
+    stereo_path.write_bytes(pcm_to_wav(float32_to_pcm(interleaved), rate, channels=2))
+
+    speech = sum(audio.size for _, audio in persona_pieces) / rate
+    print(f"Whole call:    {total / rate:.1f}s -> {mono_path}")
+    print(f"               {len(persona_pieces)} persona utterances, {speech:.1f}s of speech")
+    print(f"               caller left / persona right -> {stereo_path}")
 
 
 def _print_event(event: dict[str, object]) -> None:

@@ -14,6 +14,7 @@ from app.core.canary import (
     canary_ifsc,
     despoken,
     find_matches,
+    handle_fingerprint,
     is_visibly_fake,
     issue,
 )
@@ -238,3 +239,72 @@ class TestReadAloudMatching:
         )
         match = find_matches(self.REAL_TRANSCRIPT, [("call-earlier", identity)])[0]
         assert match.matched_text == "susila.9030@demo"
+
+
+class TestTransliterationResilientMatching:
+    """From a second live miss. The name in a handle is not stable; the digits are.
+
+    `sushila.7204@demo` was leaked and missed because Prisma transcribed the spoken name as
+    "susheela" - the same name, a different transliteration, which DECISIONS 0009 had already
+    recorded as unstable for this output format.
+    """
+
+    #: The exact transcript from the call that was missed.
+    REAL_TRANSCRIPT = (
+        "Humare record mein aapka handle susheela dot seven two zero four at d e m o hai "
+        "wahi confirm kijiye."
+    )
+    IDENTITY = CanaryIdentity(
+        identity_id="canary-00000001",
+        full_name="Sushila Khidki",
+        upi_handle="sushila.7204@demo",
+        locality="Demo Nagar",
+        phone="0012345678",
+        issued_at_ms=0,
+    )
+
+    def test_a_differently_spelled_name_still_matches_on_the_digits(self) -> None:
+        matches = find_matches(self.REAL_TRANSCRIPT, [("earlier", self.IDENTITY)])
+        assert [m.matched_field for m in matches] == ["upi_handle"]
+        assert matches[0].matched_text == "sushila.7204@demo"
+
+    def test_a_digits_only_match_scores_below_an_exact_one(self) -> None:
+        """One fewer corroborating field, and the dashboard shows the score."""
+        fuzzy = find_matches(self.REAL_TRANSCRIPT, [("earlier", self.IDENTITY)])[0]
+        exact = find_matches("handle sushila.7204@demo hai", [("earlier", self.IDENTITY)])[0]
+        assert fuzzy.score < exact.score
+        assert exact.score == 1.0
+
+    def test_one_leak_produces_one_row(self) -> None:
+        """An exact hit must not also fire the fingerprint and report the leak twice."""
+        matches = find_matches("handle sushila.7204@demo hai", [("earlier", self.IDENTITY)])
+        assert len([m for m in matches if m.matched_field == "upi_handle"]) == 1
+
+    @pytest.mark.parametrize(
+        ("handle", "expected"),
+        [
+            ("sushila.7204@demo", "7204@demo"),
+            ("ramesh.0747@demo", "0747@demo"),
+            ("prem1234@demo", "1234@demo"),
+        ],
+    )
+    def test_the_fingerprint_is_the_digits_and_the_provider(
+        self, handle: str, expected: str
+    ) -> None:
+        assert handle_fingerprint(handle) == expected
+
+    def test_a_handle_with_no_digits_has_no_fingerprint(self) -> None:
+        """A provider alone would fire on every canary ever issued."""
+        assert handle_fingerprint("sushila@demo") is None
+
+    def test_something_that_is_not_a_handle_has_no_fingerprint(self) -> None:
+        assert handle_fingerprint("no-at-sign-here") is None
+
+    def test_a_different_canarys_digits_do_not_match(self) -> None:
+        other = self.IDENTITY.model_copy(update={"upi_handle": "sushila.9999@demo"})
+        assert find_matches(self.REAL_TRANSCRIPT, [("earlier", other)]) == ()
+
+    def test_an_ordinary_sentence_with_numbers_does_not_match(self) -> None:
+        """Digits are spoken constantly - times, amounts, case numbers."""
+        text = "Case number seven two zero four register ho gaya hai, do lakh bhejiye"
+        assert find_matches(text, [("earlier", self.IDENTITY)]) == ()
