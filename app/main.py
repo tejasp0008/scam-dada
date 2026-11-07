@@ -80,6 +80,7 @@ def build_resources(settings: Settings) -> AppResources:
             model=settings.llm_model,
             fallback_model=settings.llm_fallback_model,
             fallback_reasoning_effort=settings.llm_fallback_reasoning_effort,
+            reasoning_effort=settings.llm_reasoning_effort,
             first_token_timeout=settings.llm_first_token_timeout_s,
             request_timeout=settings.llm_request_timeout_s,
             usage=budget,

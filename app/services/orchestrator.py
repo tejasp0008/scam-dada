@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -40,13 +41,21 @@ from app.core.events import (
     TranscriptEvent,
 )
 from app.core.models import Entity, PersonaId, Speaker, Turn
-from app.core.personas import LEAD_PERSONA, PersonaProfile, next_in_relay, profile_for
+from app.core.personas import (
+    LEAD_PERSONA,
+    PersonaProfile,
+    hand_back,
+    next_in_relay,
+    profile_for,
+)
 from app.core.risk import BaitHook, choose_hook
 from app.core.state import CallState, transition
 from app.core.tags import sanitize_tags, tidy_for_speech
 from app.core.turn import (
     FillerRotation,
     TurnBudget,
+    asks_for_elder,
+    asks_for_younger,
     flush_tail,
     is_handoff_due,
     recent_turns,
@@ -122,12 +131,19 @@ class CallConfig:
     tts_language: str
     sample_rate_in: int = 16000
     sample_rate_out: int = 24000
-    #: Floor for the family relay. The real trigger is hang-up risk, which arrives with the
-    #: analysis layer; this guarantees the handoff happens at all in a calm demo call.
-    handoff_after_persona_turns: int = 4
+    #: Floor for the family relay: hand the phone over after this many turns by the lead
+    #: persona, if nothing else has triggered it. Raised from 4 after a live call where the
+    #: grandson took over at turn 9 and still had it at turn 21 - the elder does the baiting
+    #: and the grandson is meant to be an interlude.
+    handoff_after_persona_turns: int = 6
+    #: How many turns the grandson keeps the phone before handing it back unprompted.
+    grandson_turns_before_handback: int = 2
     turn_budget: TurnBudget = field(default_factory=TurnBudget)
     max_reply_sentences: int = 3
     source: str = "browser"
+    #: Stream room tone between utterances so the line is never digitally silent. The
+    #: operator can switch it off mid-call; see `set_room_tone`.
+    room_tone: bool = True
     analysis_enabled: bool = True
     analysis_model: str | None = None
     #: Analyse every Nth caller turn rather than all of them.
@@ -183,7 +199,9 @@ class CallOrchestrator:
         self._sink = sink
         self._flush = flush
         self._vad = vad or EnergyVad()
-        self._clock = clock or asyncio.get_event_loop().time
+        # Monotonic rather than the loop's clock, for the same reason as the speaker: an
+        # orchestrator should be constructible outside a running loop.
+        self._clock = clock or time.monotonic
 
         self._speaker = PersonaSpeaker(tts, sink, flush=flush, clock=self._clock)
         self._state = CallState.RINGING
@@ -200,6 +218,7 @@ class CallOrchestrator:
         self._analyses: set[asyncio.Task[None]] = set()
         self._latest: TurnAnalysis | None = None
         self._used_hooks: list[str] = []
+        self._handoff_reason = ""
         self._pending_hook: BaitHook | None = None
         self._reported_entities: set[tuple[str, str]] = set()
         self._caller_turns_seen = 0
@@ -223,6 +242,19 @@ class CallOrchestrator:
     @property
     def speaking(self) -> bool:
         return self._speaker.speaking
+
+    @property
+    def room_tone_enabled(self) -> bool:
+        """Whether the line carries room tone between utterances."""
+        return self._speaker.room_tone_enabled
+
+    def set_room_tone(self, enabled: bool) -> None:
+        """Turn the background room tone on or off mid-call."""
+        self._speaker.set_room_tone(enabled)
+        logger.info(
+            "room tone toggled",
+            extra={"call_id": self._config.call_id, "enabled": enabled},
+        )
 
     def profile(self) -> CallProfile:
         return PROFILES_BY_NAME[self._persona.call_profile]
@@ -253,6 +285,8 @@ class CallOrchestrator:
     async def run(self, inbound: AsyncIterator[bytes]) -> None:
         """Answer, converse until the caller stops sending audio, then end."""
         await self._canary.start()
+        if self._config.room_tone:
+            self._speaker.start_room_tone(self.profile(), self._config.sample_rate_out)
         session = await RotatingSttSession.open(self._stt, self._config.stt_config)
         self._session = session
 
@@ -272,6 +306,7 @@ class CallOrchestrator:
             await session.aclose()
             await self._drain_events(events)
             await self._drain_analyses()
+            self._speaker.stop_room_tone()
             await self._speaker.stop()
             if self._state is not CallState.ENDED:
                 await self._set_state(CallState.ENDED, self.ended_reason)
@@ -354,7 +389,7 @@ class CallOrchestrator:
 
         await self._check_canary(caller_turn)
         self._start_analysis(caller_turn.seq)
-        await self._maybe_hand_over()
+        await self._maybe_hand_over(caller_turn.text)
         await self._reply(latency)
 
     async def _emit_transcript(self, turn: Turn) -> None:
@@ -378,16 +413,23 @@ class CallOrchestrator:
         self._turn_seq += 1
         return seq
 
-    async def _maybe_hand_over(self) -> None:
-        """Pass the phone to the next persona once the current one has said enough."""
-        if not is_handoff_due(
-            self._turns, after_persona_turns=self._config.handoff_after_persona_turns
-        ):
+    async def _maybe_hand_over(self, heard: str = "") -> None:
+        """Decide who should be holding the phone, and say so if it changes.
+
+        Three triggers, in priority order, because the caller's own words beat any counter:
+
+        1. **He asked for someone.** "Aap apne dada ji se baat karwaiye" is the clearest
+           handoff signal there is, and on a live call the system could not comply - it had
+           no way to go backwards. Ignoring a direct request is conspicuous.
+        2. **The grandson has had his turns.** He is an interlude; the elder does the baiting
+           and the phone belongs with him by default.
+        3. **The lead has spoken enough** to make the relay worth showing at all.
+        """
+        successor = self._who_should_hold(heard)
+        if successor is None or successor.persona_id is self._persona.persona_id:
             return
-        successor = next_in_relay(self._persona.persona_id)
-        if successor is None:
-            return  # end of the relay; the current persona keeps the phone
         previous = self._persona
+        reason = self._handoff_reason
         self._persona = successor
         self.persona_sequence.append(successor.persona_id)
 
@@ -398,11 +440,42 @@ class CallOrchestrator:
                 ts=ts,
                 from_persona=previous.persona_id,
                 to_persona=successor.persona_id,
-                reason=f"{previous.display_name} spoke "
-                f"{self._config.handoff_after_persona_turns} turns",
+                reason=reason,
             )
 
         await self._recorder.emit(build)
+
+    def _who_should_hold(self, heard: str) -> PersonaProfile | None:
+        """Which persona the next reply belongs to. None means no change."""
+        current = self._persona.persona_id
+        is_lead = current is LEAD_PERSONA.persona_id
+
+        if heard:
+            if is_lead and asks_for_younger(heard):
+                self._handoff_reason = "the caller asked for someone else"
+                return next_in_relay(current)
+            if not is_lead and asks_for_elder(heard):
+                self._handoff_reason = "the caller asked for the elder back"
+                return hand_back(current)
+
+        persona_turns = sum(
+            1 for turn in self._turns if turn.speaker is Speaker.PERSONA and turn.persona is current
+        )
+        if not is_lead and persona_turns >= self._config.grandson_turns_before_handback:
+            self._handoff_reason = (
+                f"{self._persona.display_name} has asked his questions and hands back"
+            )
+            return hand_back(current)
+
+        if is_lead and is_handoff_due(
+            self._turns, after_persona_turns=self._config.handoff_after_persona_turns
+        ):
+            self._handoff_reason = (
+                f"{self._persona.display_name} spoke "
+                f"{self._config.handoff_after_persona_turns} turns"
+            )
+            return next_in_relay(current)
+        return None
 
     # ---- speaking --------------------------------------------------------------------
 
@@ -474,6 +547,7 @@ class CallOrchestrator:
         spoken: list[str] = []
         buffer = ""
         sentences = 0
+        interrupted = False
         started = self._clock()
         first_token_at: float | None = None
 
@@ -490,8 +564,14 @@ class CallOrchestrator:
                     sentence, buffer = split
                     ready.set()
                     await self._await_filler(filler)
-                    await self._speak(sentence, latency, spoken)
+                    if not await self._speak(sentence, latency, spoken):
+                        # Cut off, or the synthesiser refused. Either way the rest of this
+                        # reply is stale: the caller has moved on and is already talking.
+                        interrupted = True
+                        break
                     sentences += 1
+                if interrupted:
+                    break
                 if sentences >= self._config.max_reply_sentences:
                     break
         except ProviderError as exc:
@@ -501,7 +581,11 @@ class CallOrchestrator:
 
         ready.set()
         await self._await_filler(filler)
-        if sentences < self._config.max_reply_sentences and (tail := flush_tail(buffer)):
+        if (
+            not interrupted
+            and sentences < self._config.max_reply_sentences
+            and (tail := flush_tail(buffer))
+        ):
             await self._speak(tail, latency, spoken)
 
         if spoken:
@@ -574,20 +658,38 @@ class CallOrchestrator:
             call_id=self._config.call_id,
         )
 
-    async def _speak(self, text: str, latency: TurnLatency, spoken: list[str]) -> None:
-        """Synthesise and play one sentence."""
+    async def _speak(self, text: str, latency: TurnLatency, spoken: list[str]) -> bool:
+        """Synthesise and play one sentence. Returns whether it reached the caller.
+
+        A sentence cut off by barge-in is **not** recorded as spoken. It used to be: `speak`
+        returned only a latency, so an interrupted utterance looked identical to a completed
+        one and the full sentence went into the transcript regardless. On a live call that
+        put words in Dada's mouth that the caller never heard - which is the evidence pack
+        telling a story the audio does not support.
+        """
         request = self._tts_request(text)
         try:
-            first_byte = await self._speaker.speak(request, profile=self.profile())
+            result = await self._speaker.speak(request, profile=self.profile())
         except ProviderError as exc:
             logger.warning("synthesis failed", extra={"error": str(exc), "text": text[:40]})
-            return
-        if latency.tts_first_byte_ms is None and first_byte is not None:
-            latency.tts_first_byte_ms = int(first_byte * 1000)
+            return False
+        if latency.tts_first_byte_ms is None and result.first_byte_seconds is not None:
+            latency.tts_first_byte_ms = int(result.first_byte_seconds * 1000)
+        if not result.completed:
+            logger.info(
+                "utterance cut short by the caller",
+                extra={
+                    "call_id": self._config.call_id,
+                    "text": request.text[:60],
+                    "delivered_seconds": round(result.delivered_seconds, 2),
+                },
+            )
+            return False
         # What was actually sent to the synthesiser, not the model's raw text: the recorded
         # transcript and the evidence pack should say what the persona said, and the raw text
         # still carries the line breaks and the stripped tags that never reached the caller.
         spoken.append(request.text)
+        return True
 
     async def _record_persona_turn(self, text: str, latency: TurnLatency) -> None:
         turn = Turn(

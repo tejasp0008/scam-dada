@@ -92,6 +92,14 @@ class Settings(BaseSettings):
     # without notice, so a second model is always configured. Measured in DECISIONS 0010.
     llm_fallback_model: str = "openai/gpt-oss-120b"
     llm_fallback_reasoning_effort: str = "low"
+    #: Reasoning effort for the *dialogue* model, not just the fallback.
+    #:
+    #: Empty leaves it unset. It is set to "none" by default because a live call showed the
+    #: primary returning `no content (reasoning-only completion)` repeatedly once the persona
+    #: prompt grew: a reasoning model given a dense instruction set spends its budget
+    #: thinking and emits nothing, every such turn costs a second model call, and the reply
+    #: arrives so late the caller has already started talking over it.
+    llm_reasoning_effort: str = "none"
     # If the primary has produced no token by now, switch. A scammer hears dead air.
     llm_first_token_timeout_s: float = 3.0
     llm_request_timeout_s: float = 30.0

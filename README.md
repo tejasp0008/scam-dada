@@ -49,10 +49,11 @@ Built for the Great Indian AI Internship Challenge on Gnani's speech models.
 | **LLM analysis** | A validated-JSON second opinion that adds what regex cannot see, never blocks the dialogue path, and degrades to the keyword pass when the model is down |
 | **Control room** | `/dashboard` — live call list, stage ladder, pressure and risk gauges with their signals, transcript, extracted intelligence with provenance, per-turn latency |
 | **Read API** | `/api/calls`, `/api/calls/{id}`, and `/api/calls/{id}/events?after_seq=` for a dashboard that reconnected mid-call |
+| **Continuous room tone** | The line never goes digitally silent: the bed plays between utterances from the same loop position, so the fan does not restart when the persona stops. Switchable on the page and over the socket |
 | **Live demo page** | `/demo` — microphone, who-is-speaking and an echo warning on the left, the live dashboard on the right. One screen, one call, no tab switching |
 | **Replay** | `/demo?replay=<call_id>` plays a finished call back through the same panels, so the visuals can be rehearsed without talking |
 | **Evidence pack** | HTML and PDF per call: headline minutes wasted, every identifier with the machine that found it, identity leaks, latency distribution, full transcript |
-| Tests | 1140 offline + 64 contract, `ruff` and `mypy` clean (`mypy --strict` on `core` and `providers`) |
+| Tests | 1161 offline + 64 contract, `ruff` and `mypy` clean (`mypy --strict` on `core` and `providers`) |
 
 Measured on two consecutive live calls through the orchestrator (2026-11-06), per turn,
 from the caller stopping speaking:
@@ -173,7 +174,7 @@ cp .env.example .env     # then fill in GNANI_API_KEY and the LLM_* values
 make install             # venv on 3.11 + dev dependencies
 make up                  # postgres + redis
 make migrate             # apply the baseline schema
-make test                # 1140 tests, offline, zero API cost
+make test                # 1161 tests, offline, zero API cost
 make dev                 # api on http://localhost:8000
 ```
 
@@ -272,6 +273,10 @@ real limit.
   a different one and no longer competes with dialogue. After trimming, a dialogue turn is
   ~1566 tokens against qwen's 7000 ITPM: about four turns a minute, one every 13 s, against
   a natural cycle of roughly 16 s. It fits, with little headroom (DECISIONS 0027).
+- **An interrupted reply is dropped, not recorded.** A sentence cut off by barge-in never
+  reaches the transcript or the evidence pack, because recording it would put words in the
+  persona's mouth that the caller never heard. The consequence is that a call with heavy
+  interruption shows fewer persona turns than the model actually generated.
 - **The scam stage shown is the keyword reading, not the model's.** Where they disagree the
   model's answer is carried alongside rather than merged, so the dashboard can show a
   conflict. The keyword pass is reproducible; the model is not.

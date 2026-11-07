@@ -55,6 +55,7 @@ SCAMMER_SCRIPT = (
     "Case number FAKE-CYB-0001 register ho gaya hai, abhi verify karna padega.",
     "Aap kisi ko bataiye mat, warrant nikal jayega aapke naam par.",
     "Verification ke liye fake.officer@demo par chhota amount bhej dijiye.",
+    "Aap apne dada ji se baat karwaiye, mujhe unse hi baat karni hai.",
 )
 
 #: Not one of the persona voices: the scammer must not sound like the family.
@@ -75,7 +76,30 @@ GAP_SECONDS = 1.2
 WAIT_FOR_PERSONA_SECONDS = 14.0
 
 #: How long the line has to be quiet before the persona counts as finished.
-PERSONA_QUIET_SECONDS = 0.8
+#:
+#: Longer than it looks like it needs to be, because a reply is spoken sentence by sentence
+#: and the gap *inside* one reply - synthesise, render, hand over - runs to about a second.
+#: At 0.8 s the driver decided he had finished after his first sentence and talked over the
+#: rest, which showed up as three barge-ins and replies truncated to four words. A human
+#: waits longer than this before assuming someone is done.
+PERSONA_QUIET_SECONDS = 2.0
+
+#: RMS above which inbound audio counts as the persona *speaking* rather than as the room
+#: tone that now plays continuously between utterances.
+#:
+#: Without this the driver never sees a quiet line, waits out its full timeout every turn and
+#: then talks over the reply anyway - which on one run produced three barge-ins and three
+#: caller turns with no answer at all. The bed sits near 0.012 RMS and speech near 0.07, so
+#: the gap is wide and this threshold is not delicate.
+SPEECH_RMS = 0.03
+
+
+def is_speech(pcm: bytes) -> bool:
+    """Whether a chunk of inbound audio is the persona talking, not the room."""
+    samples = pcm_to_float32(pcm)
+    if samples.size == 0:
+        return False
+    return bool(np.sqrt(np.mean(np.square(samples.astype(np.float64)))) >= SPEECH_RMS)
 
 
 async def synthesise_script(lines: tuple[str, ...]) -> list[np.ndarray]:
@@ -155,8 +179,12 @@ async def run_call(url: str, lines: list[np.ndarray], out: Path) -> int:
             async for message in socket:
                 if isinstance(message, bytes):
                     received.extend(message)
-                    last_audio = time.monotonic()
-                    timeline.append((last_audio - call_started, pcm_to_float32(message), "persona"))
+                    now = time.monotonic()
+                    # Room tone belongs in the recording but not in turn-taking: the line is
+                    # never silent now, so "has he stopped" has to mean "stopped speaking".
+                    if is_speech(message):
+                        last_audio = now
+                    timeline.append((now - call_started, pcm_to_float32(message), "persona"))
                     continue
                 payload = json.loads(message)
                 kind = payload.get("type")

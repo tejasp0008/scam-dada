@@ -95,9 +95,7 @@ def next_in_relay(current: PersonaId | None) -> PersonaProfile | None:
     """The persona after `current`, or `None` at the end of the relay.
 
     `None` in means "nobody has the phone yet", so the lead persona is returned. `None` out
-    means the family has run out of people and the orchestrator must stall or end the call
-    rather than wrapping around — handing the scammer back to a voice he already heard is
-    the fastest way to break the illusion.
+    means the family has run out of people to pass the phone *forward* to.
     """
     if current is None:
         return LEAD_PERSONA
@@ -109,6 +107,29 @@ def next_in_relay(current: PersonaId | None) -> PersonaProfile | None:
     if index + 1 >= len(RELAY):
         return None
     return RELAY[index + 1]
+
+
+def hand_back(current: PersonaId | None) -> PersonaProfile | None:
+    """Give the phone back to the persona before `current`, or None if there is none.
+
+    An earlier version refused to go backwards, on the theory that returning the scammer to
+    a voice he has already heard breaks the illusion. A live call showed the opposite: the
+    grandson took the phone at turn 9 and still had it at turn 21, the scammer eventually
+    said "aap apne dada ji se baat karwaiye" — put me on to your grandfather — and the system
+    could not comply. Refusing the most natural thing in a family is what broke the illusion.
+
+    It is also what the grandson's own prompt already promises: that he puts his grandfather
+    back on when he runs out of questions. The lead persona is the one doing the baiting, so
+    the phone belongs with him by default and the grandson is an interlude.
+    """
+    if current is None:
+        return None
+    order = [profile.persona_id for profile in RELAY]
+    try:
+        index = order.index(current)
+    except ValueError:
+        raise ValueError(f"no profile registered for {current}") from None
+    return RELAY[index - 1] if index > 0 else None
 
 
 def relay_collision(voices: dict[PersonaId, str]) -> str | None:

@@ -86,6 +86,7 @@ def build_llm_provider(
     model: str = "",
     fallback_model: str = "",
     fallback_reasoning_effort: str = "low",
+    reasoning_effort: str = "",
     first_token_timeout: float = 3.0,
     request_timeout: float = 30.0,
     usage: UsageRecorder | None = None,
@@ -105,6 +106,10 @@ def build_llm_provider(
         client=client,
         usage=usage,
         name=f"llm:{model}",
+        # The dialogue model needs this as much as the fallback does. Without it a reasoning
+        # model given a dense persona prompt returns empty content, every such turn costs a
+        # second model call, and the reply lands after the caller has started talking again.
+        extra_body={"reasoning_effort": reasoning_effort} if reasoning_effort else None,
         request_timeout=request_timeout,
     )
     if not fallback_model or fallback_model == model:

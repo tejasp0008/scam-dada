@@ -303,6 +303,9 @@ class TestBargeIn:
 
 
 class TestRelay:
+    """Who holds the phone. Rewritten after a live call where the grandson took it at turn 9
+    and still had it at turn 21, and the scammer asked for Dada back and was refused."""
+
     async def test_the_phone_is_handed_to_the_grandson(self) -> None:
         orchestrator, recorder, _, _ = build(
             script=("Ek.", "Do.", "Teen.", "Chaar."), frames_per_utterance=4, handoff_after=1
@@ -313,19 +316,78 @@ class TestRelay:
         assert handoffs
         assert handoffs[0].from_persona is PersonaId.DADA
         assert handoffs[0].to_persona is PersonaId.GRANDSON
-        assert orchestrator.persona_sequence == [PersonaId.DADA, PersonaId.GRANDSON]
 
-    async def test_the_relay_does_not_wrap_back_to_dada(self) -> None:
-        """Handing the scammer a voice he already heard is the fastest way to break it."""
+    async def test_the_grandson_hands_the_phone_back(self) -> None:
+        """He is an interlude. The elder does the baiting, so the phone returns to him."""
         orchestrator, recorder, _, _ = build(
             script=tuple(f"Sawaal {i}." for i in range(8)),
             frames_per_utterance=4,
             handoff_after=1,
         )
+        orchestrator._config.grandson_turns_before_handback = 2
         await orchestrator.run(audio(speech_frames=5, silence_frames=3, bursts=8))
+
+        moves = [
+            (e.from_persona, e.to_persona)
+            for e in recorder.history()
+            if e.type is EventType.PERSONA_HANDOFF
+        ]
+        assert (PersonaId.DADA, PersonaId.GRANDSON) in moves
+        assert (PersonaId.GRANDSON, PersonaId.DADA) in moves
+
+    async def test_the_elder_ends_up_with_most_of_the_turns(self) -> None:
+        """The thing that was actually wrong: the grandson did most of the talking."""
+        orchestrator, recorder, _, _ = build(
+            script=tuple(f"Sawaal {i}." for i in range(10)),
+            frames_per_utterance=4,
+            handoff_after=3,
+        )
+        await orchestrator.run(audio(speech_frames=5, silence_frames=3, bursts=10))
+
+        said = [
+            e.persona
+            for e in recorder.history()
+            if e.type is EventType.TRANSCRIPT and e.speaker is Speaker.PERSONA
+        ]
+        assert said.count(PersonaId.DADA) > said.count(PersonaId.GRANDSON)
+
+    async def test_the_caller_asking_for_the_elder_brings_him_back(self) -> None:
+        """A direct request beats any counter, and ignoring one is conspicuous."""
+        orchestrator, recorder, _, _ = build(
+            script=("Ek.", "Do.", "Aap apne dada ji se baat karwaiye."),
+            frames_per_utterance=4,
+            handoff_after=1,
+        )
+        orchestrator._config.grandson_turns_before_handback = 99
+        await orchestrator.run(audio(speech_frames=5, silence_frames=3, bursts=3))
+
         handoffs = [e for e in recorder.history() if e.type is EventType.PERSONA_HANDOFF]
-        assert len(handoffs) == 1
-        assert orchestrator.persona_sequence.count(PersonaId.DADA) == 1
+        back = [e for e in handoffs if e.to_persona is PersonaId.DADA]
+        assert back, "the caller asked for Dada and did not get him"
+        assert "asked for the elder" in back[-1].reason
+
+    async def test_the_caller_asking_for_someone_else_brings_the_grandson(self) -> None:
+        orchestrator, recorder, _, _ = build(
+            script=("Mujhe samajh nahi aa raha, koi aur hai ghar mein?",),
+            frames_per_utterance=6,
+            handoff_after=99,
+        )
+        await orchestrator.run(audio(speech_frames=8, silence_frames=4, bursts=1))
+
+        handoffs = [e for e in recorder.history() if e.type is EventType.PERSONA_HANDOFF]
+        assert handoffs
+        assert handoffs[0].to_persona is PersonaId.GRANDSON
+        assert "asked for someone else" in handoffs[0].reason
+
+    async def test_a_handoff_reason_is_always_recorded(self) -> None:
+        """It is shown on the dashboard, so an empty one is a blank line on camera."""
+        orchestrator, recorder, _, _ = build(
+            script=("Ek.", "Do.", "Teen."), frames_per_utterance=4, handoff_after=1
+        )
+        await orchestrator.run(audio(speech_frames=5, silence_frames=3, bursts=3))
+        for event in recorder.history():
+            if event.type is EventType.PERSONA_HANDOFF:
+                assert event.reason.strip()
 
     async def test_the_grandson_gets_his_own_prompt(self) -> None:
         orchestrator, _, _, llm = build(

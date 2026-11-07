@@ -12,6 +12,7 @@ measured 174-380 ms time-to-first-token that turns a two-second wait into about 
 from __future__ import annotations
 
 import random
+import re
 from collections.abc import Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -166,7 +167,7 @@ class TurnBudget(BaseModel):
 
     max_turns: int = Field(default=10, ge=2, description="Most recent turns kept verbatim.")
     max_chars: int = Field(
-        default=2200,
+        default=1800,
         ge=200,
         description="Hard ceiling on the window. Sized against the token budget rather than "
         "against what the model could take: history is as large a per-turn cost as the "
@@ -212,3 +213,31 @@ def is_handoff_due(turns: Sequence[Turn], *, after_persona_turns: int) -> bool:
             count = 0
         count += 1
     return count >= after_persona_turns
+
+
+#: Things a caller says when he wants the other person back. Matched on the caller's last
+#: turn, because a request to speak to someone is the clearest handoff signal there is - far
+#: clearer than any turn count - and ignoring it is conspicuous.
+_ASKS_FOR_ELDER = re.compile(
+    r"\b(?:dada|dadaji|dada\s*ji|grandfather|uncle|buzurg|budhe?\s*(?:aadmi|sahab)?)\b"
+    r".{0,30}\b(?:se|ko|baat|bula|karwa|do|dijiye|give|put|speak|talk)\w*"
+    r"|\b(?:baat\s*karwa|phone\s*(?:do|dijiye|de)|put\s+(?:him|them)\s+(?:on|back))\w*",
+    re.IGNORECASE,
+)
+
+#: And the reverse: a caller who wants the younger one, or says the elder cannot follow.
+_ASKS_FOR_YOUNGER = re.compile(
+    r"\b(?:pot[aei]|grandson|beta|young|ladke?)\b.{0,30}\b(?:se|ko|baat|bula|karwa|do|dijiye)\w*"
+    r"|\b(?:koi\s+aur|someone\s+else|samajh\s+nahi\s+(?:aa\s+)?rah[ae])\b",
+    re.IGNORECASE,
+)
+
+
+def asks_for_elder(text: str) -> bool:
+    """Whether the caller just asked to speak to the older person."""
+    return bool(_ASKS_FOR_ELDER.search(text))
+
+
+def asks_for_younger(text: str) -> bool:
+    """Whether the caller just asked for someone other than the person holding the phone."""
+    return bool(_ASKS_FOR_YOUNGER.search(text))

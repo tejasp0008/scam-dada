@@ -123,6 +123,7 @@ async def call_socket(socket: WebSocket) -> None:
             "canary": canary.identity.model_dump(mode="json"),
             "sample_rate_in": INBOUND_SAMPLE_RATE,
             "sample_rate_out": OUTBOUND_SAMPLE_RATE,
+            "room_tone": orchestrator.room_tone_enabled,
         }
     )
     logger.info("call started", extra={"call_id": call_id, "source": "browser"})
@@ -133,7 +134,7 @@ async def call_socket(socket: WebSocket) -> None:
     relay = asyncio.create_task(_relay_events(socket, resources, call_id))
 
     try:
-        await orchestrator.run(_inbound(socket))
+        await orchestrator.run(_inbound(socket, orchestrator))
     except BudgetExceeded as exc:
         # The one failure worth telling the operator about in words: it is not a bug, it is
         # the guard doing its job, and the demo needs to know before it records.
@@ -181,12 +182,12 @@ async def _send_event(socket: WebSocket, event: DomainEvent) -> None:
     await _say(socket, {"type": "event", "event": event.model_dump(mode="json")})
 
 
-async def _inbound(socket: WebSocket) -> AsyncIterator[bytes]:
+async def _inbound(socket: WebSocket, orchestrator: CallOrchestrator) -> AsyncIterator[bytes]:
     """Yield caller audio until the socket closes.
 
-    A text frame from the browser is a control message, not audio. Only `hangup` is
-    recognised; anything else is ignored rather than fatal, so an older page talking to a
-    newer server degrades instead of dropping the call.
+    A text frame from the browser is a control message, not audio. `hangup` ends the call and
+    `room-tone:on|off` toggles the background bed; anything else is ignored rather than
+    fatal, so an older page talking to a newer server degrades instead of dropping the call.
     """
     while True:
         try:
@@ -197,8 +198,16 @@ async def _inbound(socket: WebSocket) -> AsyncIterator[bytes]:
             return
         if (data := message.get("bytes")) is not None:
             yield data
-        elif (text := message.get("text")) is not None and text.strip() == "hangup":
+            continue
+        text = (message.get("text") or "").strip()
+        if text == "hangup":
             return
+        if text.startswith("room-tone:"):
+            orchestrator.set_room_tone(text.split(":", 1)[1] == "on")
+            await _say(
+                socket,
+                {"type": "room-tone", "enabled": orchestrator.room_tone_enabled},
+            )
 
 
 async def _say(socket: WebSocket, payload: dict[str, object]) -> None:

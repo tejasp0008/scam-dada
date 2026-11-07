@@ -120,6 +120,21 @@ html, body {
 }
 .btn.stop { border-color: #7a2e2b; color: var(--danger); background: #170f10; }
 
+/* The room-tone switch. Its own state is shown by a lamp rather than by the label alone,
+ * because on camera a label change is easy to miss and a lamp going dark is not. */
+.btn.toggle {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 14px; padding: 11px 14px;
+}
+.btn.toggle .led {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: #3a4252; box-shadow: none;
+  transition: background .2s, box-shadow .2s;
+  flex: none;
+}
+.btn.toggle.on { border-color: #2c6b45; }
+.btn.toggle.on .led { background: var(--persona); box-shadow: 0 0 9px #4ade8099; }
+
 /* Who is speaking. The single most useful indicator on camera: it tells a viewer
  * instantly whether the machine is listening or talking. */
 .speaking {

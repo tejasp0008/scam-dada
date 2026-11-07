@@ -208,3 +208,46 @@ class TestPagePanels:
     def test_the_page_shows_the_risk_signals_beside_the_gauge(self, client: TestClient) -> None:
         """A number the operator cannot explain is a number they will not trust."""
         assert "event.signals" in client.get("/simulator").text
+
+
+class TestRoomTone:
+    """Background room tone, and the switch for it.
+
+    A line that is digitally silent whenever nobody speaks is the loudest tell left: real
+    rooms do not stop. The switch exists because on some setups the bed is the thing feeding
+    back into the microphone.
+    """
+
+    def test_the_ready_message_states_whether_room_tone_is_on(
+        self, call_client: TestClient
+    ) -> None:
+        with call_client.websocket_connect("/ws/call") as socket:
+            assert socket.receive_json()["room_tone"] is True
+            socket.send_text("hangup")
+            drain(socket)
+
+    def test_it_can_be_switched_off_and_on_mid_call(self, call_client: TestClient) -> None:
+        with call_client.websocket_connect("/ws/call") as socket:
+            assert socket.receive_json()["type"] == "ready"
+            socket.send_text("room-tone:off")
+            socket.send_text("room-tone:on")
+            socket.send_text("hangup")
+            control, _ = drain(socket)
+
+        acks = [m["enabled"] for m in control if m["type"] == "room-tone"]
+        assert acks == [False, True]
+
+    def test_an_unknown_control_message_is_still_ignored(self, call_client: TestClient) -> None:
+        with call_client.websocket_connect("/ws/call") as socket:
+            assert socket.receive_json()["type"] == "ready"
+            socket.send_text("room-tone")  # no value
+            socket.send_text("something-else")
+            socket.send_text("hangup")
+            control, _ = drain(socket)
+            assert any(m["type"] == "ended" for m in control)
+
+    def test_the_page_offers_the_switch(self, call_client: TestClient) -> None:
+        page = call_client.get("/demo").text
+        assert "btn-room-tone" in page
+        assert "Room tone" in page
+        assert "room-tone:" in call_client.get("/static/demo.js").text

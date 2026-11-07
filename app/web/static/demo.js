@@ -123,6 +123,7 @@ async function start() {
 
     startedAt = Date.now();
     el("btn-stop").disabled = false;
+    el("btn-room-tone").disabled = false;
     setWho("idle");
     tick();
   };
@@ -196,6 +197,22 @@ function resample(samples, from, to) {
   return out;
 }
 
+let roomTone = true;
+
+function setRoomToneUi(enabled) {
+  roomTone = enabled;
+  el("btn-room-tone").classList.toggle("on", enabled);
+  el("room-tone-text").textContent = `Room tone: ${enabled ? "on" : "off"}`;
+}
+
+function toggleRoomTone() {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  // Optimistic, then corrected by the server's acknowledgement, so the lamp responds the
+  // instant it is pressed on camera rather than after a round trip.
+  setRoomToneUi(!roomTone);
+  socket.send(`room-tone:${roomTone ? "on" : "off"}`);
+}
+
 function stop() {
   if (socket && socket.readyState === WebSocket.OPEN) socket.send("hangup");
   finish("you hung up");
@@ -207,6 +224,7 @@ function finish(reason) {
   el("state-text").textContent = reason;
   el("chip-state").className = "chip";
   el("btn-stop").disabled = true;
+  el("btn-room-tone").disabled = true;
   el("btn-start").disabled = false;
   setWho("idle");
   animateBars(0);
@@ -219,6 +237,7 @@ function finish(reason) {
 function onControl(message) {
   if (message.type === "ready") {
     el("chip-call").textContent = message.call_id.slice(0, 8);
+    if (typeof message.room_tone === "boolean") setRoomToneUi(message.room_tone);
     if (message.canary) {
       el("canary-name").textContent = message.canary.full_name;
       el("canary-handle").textContent = message.canary.upi_handle;
@@ -233,6 +252,8 @@ function onControl(message) {
     onEvent(message.event);
   } else if (message.type === "error") {
     addTurn("system", "error", message.message);
+  } else if (message.type === "room-tone") {
+    setRoomToneUi(message.enabled);
   } else if (message.type === "ended") {
     finish(message.reason || "call ended");
   }
@@ -556,6 +577,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 el("btn-start").onclick = start;
 el("btn-stop").onclick = stop;
+el("btn-room-tone").onclick = toggleRoomTone;
 buildLadder();
 animateBars(0);
 

@@ -979,3 +979,65 @@ reconstructing a stream from the report when Redis has expired the event log.
 microphone and trips the barge-in detector, cutting Dada off mid-sentence — the single most
 likely way a live demo goes wrong. The page inspects the track label and
 `echoCancellation` setting and says which of the three situations it is in.
+
+## 0028 — Four things a live human call exposed
+*2026-11-07 · demo hardening*
+
+A real conversation through a microphone broke things that six scripted calls had not.
+
+**1. The transcript contained words the caller never heard.** `PersonaSpeaker.speak` returned
+only a latency, so an utterance cut off by barge-in was indistinguishable from a finished
+one, and the orchestrator recorded the full sentence either way. On a live call three
+utterances were cut and all three went into the record as spoken. That is the evidence pack
+telling a story the audio does not support, which is the one thing it must never do. `speak`
+now returns a `Spoken` with `completed`, and an interrupted sentence is logged and dropped
+rather than recorded. The rest of that reply is abandoned too: the caller has moved on.
+
+**2. The grandson did most of the talking.** He took the phone at turn 9 of a live call and
+still had it at turn 21 — and when the scammer said "aap apne dada ji se baat karwaiye", the
+system could not comply, because the relay refused to go backwards. DECISIONS 0015 had
+reasoned that returning a caller to a voice he has already heard breaks the illusion. The
+opposite is true: refusing the most natural thing in a family is what breaks it, and the
+grandson's own prompt already promises he puts his grandfather back on.
+
+So `hand_back` exists, and who holds the phone is decided by three triggers in priority
+order: **the caller's own words** ("put me on to your grandfather" is the clearest handoff
+signal there is), then **the grandson's turn limit** — he is an interlude, two turns — then
+the lead's floor, raised from 4 to 6. The elder does the baiting, so the phone belongs with
+him by default. A test asserts he ends up with more turns than the grandson.
+
+**3. Dada was slow but not *exhausting*.** The prompt described an old man; it did not
+describe a tactic. It now does, in the one section that matters: never say no, agree and then
+undo it, make him repeat himself, re-ask what he has already answered, answer a different
+question from the one asked, be delighted by him, take his urgency personally and become
+slower — and never look deliberate, because the moment he thinks the delay is a tactic he
+hangs up. Merged with the old stalling section, which said much the same thing less usefully.
+
+**4. The line was digitally silent whenever nobody spoke.** Real rooms do not stop. The
+comfort-noise loop from Phase 2 is now wired in: it reads the *same* bed at the *same* offset
+the utterances are mixed over, so switching between speaking and not speaking does not
+restart the fan. Measured on a live call: 49% room tone, 48% speech, 2% true silence. There
+is a switch, on the page and over the socket as `room-tone:on|off`, because on some setups
+the bed is the thing feeding back into the microphone.
+
+### Two things that only appeared once those were fixed
+
+**The dialogue model was returning empty completions.** `qwen/qwen3.8-27b returned no content
+(reasoning-only completion)`, repeatedly, once the persona prompt grew denser. A reasoning
+model given a thick instruction set spends its budget thinking and emits nothing; every such
+turn costs a second model call, and the reply lands after the caller has started talking
+again. `reasoning_effort` was configured for the *fallback* only — DECISIONS 0014 found this
+exact failure on gpt-oss and fixed it in one place. It is now set for the dialogue model too.
+
+**The scripted driver could not tell room tone from speech,** so after the bed was added it
+never saw a quiet line, waited out its full timeout every turn and talked over the reply
+anyway. It now thresholds on RMS — the bed sits near 0.012 and speech near 0.07. And its
+quiet threshold went from 0.8 s to 2.0 s, because a reply is spoken sentence by sentence and
+the gap *inside* one reply is about a second: at 0.8 s the driver decided Dada had finished
+after his first sentence. Barge-ins on the final run: **zero**, with every caller turn
+answered, against three and three missing replies before.
+
+Also fixed in passing: `PersonaSpeaker` and `CallOrchestrator` took their clock from
+`asyncio.get_event_loop().time`, which is deprecated in that form and meant neither could be
+constructed outside a running loop. Both use `time.monotonic`, which is what the
+measurements wanted anyway.

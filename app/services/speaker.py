@@ -20,10 +20,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from contextlib import aclosing
 
 import numpy as np
+from pydantic import BaseModel, ConfigDict
 
 from app.core.audio.ambience import AmbienceBed
 from app.core.audio.call_profile import CallProfile
@@ -35,6 +37,28 @@ logger = logging.getLogger(__name__)
 #: Outgoing audio is handed to the transport in slices this long, so a barge-in is acted on
 #: within one slice rather than at the end of a sentence.
 CHUNK_MS = 60
+
+#: How much room tone the comfort-noise loop hands over at a time. Long enough that the loop
+#: wakes a few times a second rather than constantly, short enough that switching it off is
+#: heard immediately.
+COMFORT_CHUNK_MS = 500
+
+
+class Spoken(BaseModel):
+    """What actually reached the caller for one utterance.
+
+    `completed` is the field that matters. `speak` used to return only a latency, so a
+    caller could not tell "said it" from "was cut off half a word in" - and the orchestrator
+    recorded the full sentence either way, which put text in the transcript that the caller
+    never heard.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    completed: bool
+    first_byte_seconds: float | None = None
+    audio_seconds: float = 0.0
+    delivered_seconds: float = 0.0
 
 
 class PersonaSpeaker:
@@ -51,9 +75,13 @@ class PersonaSpeaker:
         self._tts = tts
         self._sink = sink
         self._flush = flush
-        self._clock = clock or asyncio.get_event_loop().time
-        self._current: asyncio.Task[float | None] | None = None
+        # `time.monotonic`, not `asyncio.get_event_loop().time`: a speaker should be
+        # constructible without a running loop (that call raises in a synchronous test and
+        # is deprecated besides), and monotonic is what the measurements actually want.
+        self._clock = clock or time.monotonic
+        self._current: asyncio.Task[Spoken] | None = None
         self._interrupted = False
+        self._delivered = 0.0
         self._beds: dict[str, AmbienceBed] = {}
         self._bed_offset = 0
         self.interruptions = 0
@@ -61,6 +89,9 @@ class PersonaSpeaker:
         #: know how long the transport will be busy, because `speak` returns as soon as the
         #: bytes are handed over - the browser's ring buffer does the actual pacing.
         self.last_audio_seconds = 0.0
+        self._comfort: asyncio.Task[None] | None = None
+        self._comfort_profile: CallProfile | None = None
+        self.room_tone_enabled = True
 
     @property
     def speaking(self) -> bool:
@@ -82,10 +113,11 @@ class PersonaSpeaker:
             self._beds[key] = AmbienceBed(profile.ambience, sample_rate)
         return self._beds[key]
 
-    async def speak(self, request: TtsRequest, *, profile: CallProfile) -> float | None:
-        """Say one utterance. Returns seconds to first audio out, or None if interrupted."""
+    async def speak(self, request: TtsRequest, *, profile: CallProfile) -> Spoken:
+        """Say one utterance, reporting whether it actually finished."""
         await self.stop()
         self._interrupted = False
+        self._delivered = 0.0
         task = asyncio.create_task(self._play(request, profile))
         self._current = task
         try:
@@ -94,10 +126,14 @@ class PersonaSpeaker:
             # Only swallow the cancellation that `stop` caused. An outer cancellation - the
             # call ending, the transport dropping - must keep propagating.
             if task.cancelled() and self._interrupted:
-                return None
+                return Spoken(
+                    completed=False,
+                    audio_seconds=self.last_audio_seconds,
+                    delivered_seconds=self._delivered,
+                )
             raise
 
-    async def _play(self, request: TtsRequest, profile: CallProfile) -> float | None:
+    async def _play(self, request: TtsRequest, profile: CallProfile) -> Spoken:
         started = self._clock()
         pcm = bytearray()
         # `aclosing` rather than a bare `async for`: on a barge-in this task is cancelled
@@ -123,10 +159,15 @@ class PersonaSpeaker:
 
         out = float32_to_pcm(result.audio)
         self.last_audio_seconds = result.seconds
+        self._delivered = 0.0
         slice_bytes = max(2, int(CHUNK_MS / 1000.0 * request.sample_rate) * 2)
         first_at: float | None = None
         for start in range(0, len(out), slice_bytes):
-            await self._sink(out[start : start + slice_bytes])
+            # Named `piece` rather than `chunk`: `chunk` above is an AudioChunk from the
+            # provider, and reusing the name made the two silently interchangeable.
+            piece = out[start : start + slice_bytes]
+            await self._sink(piece)
+            self._delivered += len(piece) / 2 / request.sample_rate
             if first_at is None:
                 first_at = self._clock()
         logger.info(
@@ -139,7 +180,61 @@ class PersonaSpeaker:
                 "dropped_packets": result.dropped_packets,
             },
         )
-        return None if first_at is None else first_at - started
+        return Spoken(
+            completed=True,
+            first_byte_seconds=None if first_at is None else first_at - started,
+            audio_seconds=result.seconds,
+            delivered_seconds=self._delivered,
+        )
+
+    def start_room_tone(self, profile: CallProfile, sample_rate: int) -> None:
+        """Keep the line alive between utterances.
+
+        A call that is digitally silent whenever nobody is speaking is the loudest tell left:
+        real rooms do not stop, and a scammer hears the absence even if he could not name it.
+        The bed is the same loop the utterances are mixed over and reads from the same
+        offset, so switching between "Dada speaking" and "Dada not speaking" does not restart
+        the fan.
+        """
+        self.stop_room_tone()
+        self._comfort_profile = profile
+        if profile.ambience is None:
+            return
+        self._comfort = asyncio.create_task(self._emit_room_tone(profile, sample_rate))
+
+    def stop_room_tone(self) -> None:
+        """Stop the comfort-noise loop. Safe to call when it is not running."""
+        if self._comfort is not None:
+            self._comfort.cancel()
+            self._comfort = None
+
+    def set_room_tone(self, enabled: bool) -> None:
+        """Turn the bed on or off mid-call, without restarting it.
+
+        The loop keeps running either way and simply stops handing audio over, so the bed
+        resumes where it would have been rather than jumping back to the start of the fan.
+        """
+        self.room_tone_enabled = enabled
+
+    async def _emit_room_tone(self, profile: CallProfile, sample_rate: int) -> None:
+        """Hand over bed audio in real time whenever an utterance is not already doing so."""
+        samples = max(1, int(COMFORT_CHUNK_MS / 1000.0 * sample_rate))
+        period = samples / sample_rate
+        try:
+            while True:
+                await asyncio.sleep(period)
+                if self.speaking or not self.room_tone_enabled:
+                    # An utterance already carries the bed mixed underneath it, so emitting
+                    # here as well would double the room.
+                    continue
+                pcm = self.room_tone(profile, sample_rate, samples)
+                if pcm:
+                    await self._sink(pcm)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Comfort noise is a nicety. Losing it costs realism, never the call.
+            logger.exception("room tone loop stopped")
 
     async def stop(self) -> None:
         """Interrupt playback and tell the transport to drop what it has queued.
