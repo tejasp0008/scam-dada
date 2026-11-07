@@ -89,14 +89,32 @@ class PersonaSpeaker:
         #: know how long the transport will be busy, because `speak` returns as soon as the
         #: bytes are handed over - the browser's ring buffer does the actual pacing.
         self.last_audio_seconds = 0.0
+        #: When the transport will have finished playing what it has already been given.
+        #:
+        #: `speaking` is not this. Handing a sentence to the socket takes milliseconds while
+        #: playing it takes ten seconds, so a loop that waits on `speaking` resumes almost
+        #: immediately and keeps stacking audio behind an utterance that is still playing.
+        #: The browser's ring buffer holds eight seconds and silently drops everything past
+        #: that - which is how room tone ended up swallowing Dada's next reply entirely.
+        self._busy_until = 0.0
         self._comfort: asyncio.Task[None] | None = None
         self._comfort_profile: CallProfile | None = None
         self.room_tone_enabled = True
 
     @property
     def speaking(self) -> bool:
-        """Whether an utterance is in flight."""
+        """Whether an utterance is being synthesised or handed to the transport."""
         return self._current is not None and not self._current.done()
+
+    @property
+    def transport_busy(self) -> bool:
+        """Whether the transport is still playing audio it has already been given.
+
+        True for the whole duration of an utterance, not just while the bytes are being
+        written. Anything that wants to add audio to the line has to wait for this, not for
+        `speaking`.
+        """
+        return self._clock() < self._busy_until
 
     @property
     def bed_offset(self) -> int:
@@ -114,8 +132,13 @@ class PersonaSpeaker:
         return self._beds[key]
 
     async def speak(self, request: TtsRequest, *, profile: CallProfile) -> Spoken:
-        """Say one utterance, reporting whether it actually finished."""
-        await self.stop()
+        """Say one utterance, reporting whether it actually finished.
+
+        Saying the next sentence is not an interruption. This used to call `stop`, which
+        flushed the transport and counted an interruption - so every sentence after the
+        first cut off the one before it and the barge-in count was really a sentence count.
+        """
+        await self._supersede()
         self._interrupted = False
         self._delivered = 0.0
         task = asyncio.create_task(self._play(request, profile))
@@ -180,6 +203,9 @@ class PersonaSpeaker:
                 "dropped_packets": result.dropped_packets,
             },
         )
+        # The transport is now busy for as long as this audio lasts, less whatever has
+        # already played while the bytes were being written.
+        self._busy_until = max(self._busy_until, self._clock() + result.seconds)
         return Spoken(
             completed=True,
             first_byte_seconds=None if first_at is None else first_at - started,
@@ -223,9 +249,11 @@ class PersonaSpeaker:
         try:
             while True:
                 await asyncio.sleep(period)
-                if self.speaking or not self.room_tone_enabled:
+                if self.speaking or self.transport_busy or not self.room_tone_enabled:
                     # An utterance already carries the bed mixed underneath it, so emitting
-                    # here as well would double the room.
+                    # here would double the room - and, worse, pile audio behind a sentence
+                    # that is still playing until the receiver's buffer overflows and starts
+                    # dropping the speech.
                     continue
                 pcm = self.room_tone(profile, sample_rate, samples)
                 if pcm:
@@ -236,6 +264,31 @@ class PersonaSpeaker:
             # Comfort noise is a nicety. Losing it costs realism, never the call.
             logger.exception("room tone loop stopped")
 
+    async def _supersede(self) -> None:
+        """Clear the way for the next utterance without flushing what is already queued.
+
+        Consecutive sentences are meant to play back to back, so `_busy_until` is left alone
+        and extended by the new utterance rather than reset.
+        """
+        task = self._current
+        self._current = None
+        if task is not None and not task.done():
+            self._interrupted = True
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            self._interrupted = False
+
+    async def abandon(self) -> None:
+        """Stop producing audio because the call is over.
+
+        Not an interruption: the caller did not cut in, so it must not be counted as one.
+        `interruptions` is reported on the dashboard and in the evidence pack, and a counter
+        that ticks once at the end of every call is a fabricated number.
+        """
+        self.stop_room_tone()
+        await self._supersede()
+        self._busy_until = 0.0
+
     async def stop(self) -> None:
         """Interrupt playback and tell the transport to drop what it has queued.
 
@@ -245,12 +298,25 @@ class PersonaSpeaker:
         """
         task = self._current
         self._current = None
-        if task is None or task.done():
+        playing = self.transport_busy
+        if (task is None or task.done()) and not playing:
             return
-        self._interrupted = True
+
+        # The transport is about to be flushed, so it stops being busy now rather than when
+        # the abandoned audio would have finished.
+        self._busy_until = 0.0
+        if task is not None and not task.done():
+            self._interrupted = True
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        elif playing:
+            # Handover finished but the caller is still hearing it. This is the common case
+            # and it used to return early, so a barge-in during playback flushed nothing and
+            # the persona talked over the caller for the rest of the sentence. Barge-in only
+            # ever worked during synthesis, which is the part nobody hears.
+            self._interrupted = True
+
         self.interruptions += 1
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
         if self._flush is not None:
             await self._flush()
 

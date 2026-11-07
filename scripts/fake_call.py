@@ -171,11 +171,16 @@ async def run_call(url: str, lines: list[np.ndarray], out: Path) -> int:
     # file is a recording of half a phone call; this is the call.
     timeline: list[tuple[float, np.ndarray, str]] = []
     call_started = 0.0
+    # When the persona's audio will have finished *playing*, not when it last arrived. The
+    # server hands a whole sentence over in milliseconds and it then plays for ten seconds,
+    # so a driver that waits on arrival starts talking almost immediately and barges in on
+    # every reply - which is the same mistake the server made with `speaking`.
+    speech_until = 0.0
 
     async with websockets.connect(url, max_size=None) as socket:
 
         async def listen() -> None:
-            nonlocal flushes, call_id, last_audio
+            nonlocal flushes, call_id, last_audio, speech_until
             async for message in socket:
                 if isinstance(message, bytes):
                     received.extend(message)
@@ -184,6 +189,8 @@ async def run_call(url: str, lines: list[np.ndarray], out: Path) -> int:
                     # never silent now, so "has he stopped" has to mean "stopped speaking".
                     if is_speech(message):
                         last_audio = now
+                        seconds = len(message) / 2 / 24000
+                        speech_until = max(speech_until, now) + seconds
                     timeline.append((now - call_started, pcm_to_float32(message), "persona"))
                     continue
                 payload = json.loads(message)
@@ -228,7 +235,10 @@ async def run_call(url: str, lines: list[np.ndarray], out: Path) -> int:
 
             waited = 0.0
             while waited < WAIT_FOR_PERSONA_SECONDS:
-                if last_audio and time.monotonic() - last_audio > PERSONA_QUIET_SECONDS:
+                now = time.monotonic()
+                finished_playing = now >= speech_until
+                quiet_long_enough = bool(last_audio) and now - last_audio > PERSONA_QUIET_SECONDS
+                if finished_playing and quiet_long_enough:
                     break
                 await hold(0.2)
                 waited += 0.2
@@ -344,6 +354,13 @@ def _write_conversation(
     persona_pieces = _group_persona(
         [(offset, audio) for offset, audio, who in timeline if who == "persona"], rate
     )
+    # Room tone belongs in the mix but is not an "utterance", and counting it as one made
+    # the summary claim more seconds of speech than the call was long.
+    spoken_pieces = [
+        (offset, audio)
+        for offset, audio in persona_pieces
+        if float(np.sqrt(np.mean(np.square(audio.astype(np.float64))))) >= SPEECH_RMS
+    ]
     if not caller_pieces and not persona_pieces:
         return
 
@@ -370,9 +387,9 @@ def _write_conversation(
     stereo_path = out / f"{name}.stereo.wav"
     stereo_path.write_bytes(pcm_to_wav(float32_to_pcm(interleaved), rate, channels=2))
 
-    speech = sum(audio.size for _, audio in persona_pieces) / rate
+    speech = sum(audio.size for _, audio in spoken_pieces) / rate
     print(f"Whole call:    {total / rate:.1f}s -> {mono_path}")
-    print(f"               {len(persona_pieces)} persona utterances, {speech:.1f}s of speech")
+    print(f"               {len(spoken_pieces)} persona utterances, {speech:.1f}s of speech")
     print(f"               caller left / persona right -> {stereo_path}")
 
 

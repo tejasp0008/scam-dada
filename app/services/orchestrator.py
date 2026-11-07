@@ -306,8 +306,9 @@ class CallOrchestrator:
             await session.aclose()
             await self._drain_events(events)
             await self._drain_analyses()
-            self._speaker.stop_room_tone()
-            await self._speaker.stop()
+            # `abandon`, not `stop`: the call ending is not the caller cutting in, and
+            # counting it would add one phantom barge-in to every call ever made.
+            await self._speaker.abandon()
             if self._state is not CallState.ENDED:
                 await self._set_state(CallState.ENDED, self.ended_reason)
             await self._recorder.drain()
@@ -334,7 +335,7 @@ class CallOrchestrator:
                 # utterance costs a transcript, a seam in a silence costs nothing.
                 session.hold_rotation = speaking_now
 
-                if speaking_now and not self._was_speaking and self._speaker.speaking:
+                if speaking_now and not self._was_speaking and self._persona_audible():
                     await self._barge_in()
                 if self._was_speaking and not speaking_now:
                     # The only end-of-speech signal there is: Prisma does not emit
@@ -342,6 +343,16 @@ class CallOrchestrator:
                     self._caller_stopped_at = self._clock()
                 self._was_speaking = speaking_now
                 await session.send_audio(frame)
+
+    def _persona_audible(self) -> bool:
+        """Whether the caller can currently hear the persona.
+
+        `speaking` alone is not enough: it covers synthesis and handing bytes to the
+        transport, which together take a fraction of the seconds the audio then takes to
+        play. Checking only that meant barge-in fired during synthesis and never during
+        playback - the part the caller is actually talking over.
+        """
+        return self._speaker.speaking or self._speaker.transport_busy
 
     async def _barge_in(self) -> None:
         """The caller started talking while the persona was. Stop, immediately."""

@@ -134,3 +134,113 @@ class TestRoomToneLoop:
         await asyncio.sleep(1.2)
         speaker.stop_room_tone()
         assert not out
+
+
+class TestTransportBusy:
+    """`speaking` is not "the caller is hearing audio".
+
+    Handing a sentence to the socket takes milliseconds; playing it takes seconds. A loop
+    that waited on `speaking` resumed immediately and stacked room tone behind an utterance
+    that was still playing, until the browser's eight-second ring buffer overflowed and
+    silently dropped the *next* reply. That is the bug this models.
+    """
+
+    async def test_the_transport_stays_busy_after_the_bytes_are_handed_over(self) -> None:
+        speaker, _ = build()
+        result = await speaker.speak(request("a" * 200), profile=PROFILE)
+        assert result.completed
+        assert not speaker.speaking, "handover is finished"
+        assert speaker.transport_busy, "but the audio has not played yet"
+
+    async def test_it_stops_being_busy_once_the_audio_would_have_played(self) -> None:
+        clock = {"now": 0.0}
+        out: list[bytes] = []
+
+        async def sink(chunk: bytes) -> None:
+            out.append(chunk)
+
+        speaker = PersonaSpeaker(
+            MockTTSProvider(ms_per_char=4, chunk_ms=40), sink, clock=lambda: clock["now"]
+        )
+        result = await speaker.speak(request(), profile=PROFILE)
+        assert speaker.transport_busy
+        clock["now"] += result.audio_seconds + 0.1
+        assert not speaker.transport_busy
+
+    async def test_a_barge_in_clears_it_immediately(self) -> None:
+        """The transport is flushed, so it stops being busy now rather than when the
+        abandoned audio would have finished."""
+        speaker, _ = build()
+        await speaker.speak(request("a" * 200), profile=PROFILE)
+        assert speaker.transport_busy
+        await speaker.stop()
+        assert not speaker.transport_busy
+
+    async def test_room_tone_waits_for_the_transport_not_the_handover(self) -> None:
+        speaker, out = build()
+        speaker.start_room_tone(PROFILE, RATE)
+        await speaker.speak(request("a" * 400), profile=PROFILE)
+        spoken = len(out)
+        # Well past the handover, well inside the audio's duration.
+        await asyncio.sleep(1.2)
+        speaker.stop_room_tone()
+        assert len(out) == spoken, "room tone piled up behind audio that was still playing"
+
+
+class TestInterruptionCounting:
+    """`interruptions` reaches the dashboard and the evidence pack, so it has to mean
+    exactly one thing: the caller cut in."""
+
+    async def test_saying_the_next_sentence_is_not_an_interruption(self) -> None:
+        """It used to be. Every sentence after the first flushed the one before it, and the
+        barge-in count was really a sentence count."""
+        speaker, _ = build()
+        for _ in range(3):
+            await speaker.speak(request(), profile=PROFILE)
+        assert speaker.interruptions == 0
+
+    async def test_consecutive_sentences_are_not_flushed(self) -> None:
+        flushes: list[int] = []
+
+        async def flush() -> None:
+            flushes.append(1)
+
+        out: list[bytes] = []
+
+        async def sink(chunk: bytes) -> None:
+            out.append(chunk)
+
+        speaker = PersonaSpeaker(MockTTSProvider(ms_per_char=4, chunk_ms=40), sink, flush=flush)
+        await speaker.speak(request("Pehla vaakya."), profile=PROFILE)
+        await speaker.speak(request("Doosra vaakya."), profile=PROFILE)
+        assert flushes == [], "the second sentence cut off the first"
+
+    async def test_ending_the_call_is_not_an_interruption(self) -> None:
+        """Otherwise every call ever made reports one phantom barge-in."""
+        speaker, _ = build()
+        await speaker.speak(request(), profile=PROFILE)
+        await speaker.abandon()
+        assert speaker.interruptions == 0
+
+    async def test_the_caller_cutting_in_is_counted_and_flushes(self) -> None:
+        flushes: list[int] = []
+
+        async def flush() -> None:
+            flushes.append(1)
+
+        out: list[bytes] = []
+
+        async def sink(chunk: bytes) -> None:
+            out.append(chunk)
+
+        speaker = PersonaSpeaker(MockTTSProvider(ms_per_char=4, chunk_ms=40), sink, flush=flush)
+        await speaker.speak(request("a" * 300), profile=PROFILE)
+        assert speaker.transport_busy
+        await speaker.stop()
+        assert speaker.interruptions == 1
+        assert flushes == [1]
+
+    async def test_abandon_is_safe_when_nothing_is_playing(self) -> None:
+        speaker, _ = build()
+        await speaker.abandon()
+        assert speaker.interruptions == 0

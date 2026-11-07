@@ -17,6 +17,7 @@ class PlaybackProcessor extends AudioWorkletProcessor {
     this.read = 0;
     this.write = 0;
     this.underruns = 0;
+    this.dropped = 0;
     this.port.onmessage = (event) => {
       const message = event.data;
       if (message.type === "audio") {
@@ -32,7 +33,15 @@ class PlaybackProcessor extends AudioWorkletProcessor {
   enqueue(samples) {
     for (let i = 0; i < samples.length; i += 1) {
       const next = (this.write + 1) % CAPACITY;
-      if (next === this.read) break; // full: drop rather than overwrite unplayed audio
+      if (next === this.read) {
+        // Full. Dropping is still better than overwriting audio that has not played, but
+        // it must not be silent about it: a buffer quietly swallowing a whole reply is
+        // indistinguishable from the server never sending one, and that cost real
+        // debugging time once already.
+        this.dropped += samples.length - i;
+        this.port.postMessage({ type: "dropped", samples: this.dropped });
+        return;
+      }
       this.buffer[this.write] = samples[i];
       this.write = next;
     }

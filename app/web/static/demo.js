@@ -119,6 +119,14 @@ async function start() {
     capture.connect(ctx.destination);
 
     playback = new AudioWorkletNode(ctx, "playback-processor", { outputChannelCount: [1] });
+    // A buffer that silently swallows a reply is indistinguishable from a server that never
+    // sent one. Surface it rather than letting it hide again.
+    playback.port.onmessage = (event) => {
+      if (event.data && event.data.type === "dropped") {
+        console.warn(`playback buffer full; dropped ${event.data.samples} samples`);
+        el("state-text").textContent = "audio dropped — buffer full";
+      }
+    };
     playback.connect(ctx.destination);
 
     startedAt = Date.now();

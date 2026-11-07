@@ -1041,3 +1041,48 @@ Also fixed in passing: `PersonaSpeaker` and `CallOrchestrator` took their clock 
 `asyncio.get_event_loop().time`, which is deprecated in that form and meant neither could be
 constructed outside a running loop. Both use `time.monotonic`, which is what the
 measurements wanted anyway.
+
+## 0029 — "The text is generated but no voice comes"
+*2026-11-07 · demo hardening*
+
+Reported after a live call, immediately following the room-tone change. Four bugs, each one
+hidden behind the last, and all four share a single root cause: **`speaking` was taken to
+mean "the caller is hearing audio", and it never did.** It means "synthesising, or writing
+bytes to a socket" — milliseconds — while the audio those bytes become plays for ten seconds.
+
+**1. Room tone drowned the speech.** `_play` hands a whole sentence to the transport almost
+instantly, so `speaking` went false while ten seconds of audio were still queued in the
+browser. The comfort-noise loop saw a free line and began stacking room tone behind it. The
+ring buffer holds eight seconds and `enqueue` **dropped silently** once full — so the *next*
+reply was discarded before it was ever played. Text in the transcript, nothing in the ear.
+
+`transport_busy` now tracks when the audio will actually have finished, and the loop waits
+for that. The worklet also reports its drops instead of swallowing them: a buffer that
+quietly discards a whole reply is indistinguishable from a server that never sent one, and
+that cost real debugging time.
+
+**2. Barge-in had never worked during playback.** `stop` returned early when the playback
+task was done, and the orchestrator only tried to barge in when `speaking` was true — both
+of which stop being true the moment the bytes are written. So interrupting Dada worked only
+during synthesis, the one part of a reply nobody hears. It now triggers on
+`speaking or transport_busy`, and `stop` flushes whenever the transport is still playing.
+
+**3. Every sentence after the first cut off the one before it.** `speak` began with
+`await self.stop()`, which flushed the transport and counted an interruption. Saying the
+next sentence is not an interruption; `_supersede` does that part without flushing, so
+consecutive sentences play back to back as intended. The "barge-in count" was, in part, a
+sentence count.
+
+**4. Ending a call counted as a barge-in.** Teardown called `stop`, so every call that ever
+finished reported one phantom interruption. `abandon` exists for that, and the counter now
+means exactly one thing: the caller cut in. It reaches the dashboard and the evidence pack,
+so it has to.
+
+**The scripted driver had the same bug as the server**, for the same reason: it waited on
+when audio last *arrived*. It now tracks when the persona's audio will have finished playing
+and waits for that as well as for two seconds of quiet.
+
+Measured on the verification call afterwards: **zero barge-ins, all six caller turns
+answered with full multi-sentence replies**, 27.9 s of speech and 47.5 s of room tone across
+78 seconds, 2.5 s of true silence, no talk-over, nothing clipped. Before the fix the same
+script produced five barge-ins and truncated replies.
