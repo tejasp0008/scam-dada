@@ -164,8 +164,16 @@ class TurnBudget(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    max_turns: int = Field(default=16, ge=2, description="Most recent turns kept verbatim.")
-    max_chars: int = Field(default=4000, ge=200, description="Hard ceiling on the window.")
+    max_turns: int = Field(default=10, ge=2, description="Most recent turns kept verbatim.")
+    max_chars: int = Field(
+        default=2200,
+        ge=200,
+        description="Hard ceiling on the window. Sized against the token budget rather than "
+        "against what the model could take: history is as large a per-turn cost as the "
+        "system prompt, and dialogue and analysis share one 8000-tokens-per-minute account. "
+        "Five exchanges is ample for staying in character and not repeating oneself; the "
+        "scammer's opening pitch has already been extracted by the analysis layer by then.",
+    )
 
 
 def recent_turns(turns: Sequence[Turn], budget: TurnBudget) -> tuple[Turn, ...]:

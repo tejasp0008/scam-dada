@@ -32,7 +32,11 @@ from app.infra.settings import Settings
 PROMPT_DIR = Path(__file__).resolve().parents[2] / "app" / "prompts"
 
 #: sha256 of app/prompts/ethics.v1.md. Update only alongside a deliberate ethics change.
-ETHICS_DIGEST = "f41e1dc8f2f864c44ea38a0dd89622d1df5f9bd0b5bc30aa907f205874fce025"
+#:
+#: Updated 2026-11-07 when the block was condensed from 398 to 302 tokens for the live
+#: demo. All eight constraints survive and the six asserted below are unchanged in
+#: substance; what went was repetition. This test is why that change had to be noticed.
+ETHICS_DIGEST = "1852863c0ead47f07898737e1587444bf971864d1ab85bb630e427add3ba7fd9"
 
 
 class TestRelay:

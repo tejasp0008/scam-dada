@@ -57,6 +57,10 @@ class PersonaSpeaker:
         self._beds: dict[str, AmbienceBed] = {}
         self._bed_offset = 0
         self.interruptions = 0
+        #: Seconds of audio the last completed utterance queued. The caller needs this to
+        #: know how long the transport will be busy, because `speak` returns as soon as the
+        #: bytes are handed over - the browser's ring buffer does the actual pacing.
+        self.last_audio_seconds = 0.0
 
     @property
     def speaking(self) -> bool:
@@ -118,6 +122,7 @@ class PersonaSpeaker:
         self._bed_offset += result.audio.size
 
         out = float32_to_pcm(result.audio)
+        self.last_audio_seconds = result.seconds
         slice_bytes = max(2, int(CHUNK_MS / 1000.0 * request.sample_rate) * 2)
         first_at: float | None = None
         for start in range(0, len(out), slice_bytes):

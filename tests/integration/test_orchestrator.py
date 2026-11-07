@@ -16,12 +16,53 @@ from app.core.audio.framing import float32_to_pcm
 from app.core.canary import issue
 from app.core.events import EventType
 from app.core.models import EntitySource, EntityType, PersonaId, ScamStage, Speaker
+from app.core.personas import LEAD_PERSONA
 from app.core.state import CallState
 from app.providers.base import Role, SttConfig
 from app.providers.mock import MockLLMProvider, MockSTTProvider, MockTTSProvider
 from app.services.canary_registry import CanaryRegistry
-from app.services.orchestrator import CallConfig, CallOrchestrator
+from app.services.orchestrator import MAX_FILLERS_PER_TURN, CallConfig, CallOrchestrator
+from app.services.prompts import persona_fillers
 from app.services.recorder import CallRecorder
+
+
+class SlowLLM:
+    """Streams a reply, but only after a delay longer than one filler phrase."""
+
+    name = "slow-llm"
+
+    def __init__(self, reply: str, delay_s: float = 0.6) -> None:
+        self._reply = reply
+        self._delay = delay_s
+        self.chat_calls: list[object] = []
+
+    async def stream_chat(self, messages: object, **kwargs: object) -> AsyncIterator[str]:
+        self.chat_calls.append(messages)
+        await asyncio.sleep(self._delay)
+        for word in self._reply.split(" "):
+            yield word + " "
+
+    async def complete_json(self, messages: object, schema: type, **kwargs: object) -> object:
+        return schema.model_validate({})
+
+
+class SilentLLM:
+    """Produces nothing at all, so only the fillers ever speak."""
+
+    name = "silent-llm"
+
+    def __init__(self) -> None:
+        self.chat_calls: list[object] = []
+
+    async def stream_chat(self, messages: object, **kwargs: object) -> AsyncIterator[str]:
+        self.chat_calls.append(messages)
+        await asyncio.sleep(1.2)
+        return
+        yield ""  # pragma: no cover - makes this an async generator
+
+    async def complete_json(self, messages: object, schema: type, **kwargs: object) -> object:
+        return schema.model_validate({})
+
 
 FRAME_BYTES = 1024
 VOICES = {PersonaId.DADA: "Devansh", PersonaId.GRANDSON: "Devansh"}
@@ -473,3 +514,82 @@ class TestCanaryInTheLoop:
 
     async def test_each_call_gets_its_own_identity(self) -> None:
         assert CanaryRegistry("call-a").identity != CanaryRegistry("call-b").identity
+
+
+class TestFillerCoverage:
+    """There must never be dead silence while the model is thinking.
+
+    One filler is not enough: a cached filler is served from disk and `speak` returns as soon
+    as the bytes reach the transport, so the audio is queued rather than played. If the model
+    is slower than one phrase, the line goes quiet the moment that phrase finishes.
+    """
+
+    async def test_a_slow_model_gets_more_than_one_filler(self) -> None:
+        orchestrator, _, _, _ = build(replies=("Haan beta, ek minute. Main likh raha hoon.",))
+        # Mock TTS reports a short duration, so the coverage loop decides it needs another.
+        spoken: list[str] = []
+        original = orchestrator._speaker.speak
+
+        async def record(request: object, **kwargs: object) -> float | None:
+            spoken.append(request.text)  # type: ignore[attr-defined]
+            return await original(request, **kwargs)  # type: ignore[arg-type]
+
+        orchestrator._speaker.speak = record  # type: ignore[method-assign]
+        orchestrator._llm = SlowLLM("Haan beta, main sun raha hoon. Aap boliye na.")  # type: ignore[assignment]
+        await orchestrator.run(audio(speech_frames=8, silence_frames=4, bursts=1))
+
+        fillers = [text for text in spoken if text in persona_fillers(LEAD_PERSONA)]
+        assert len(fillers) >= 2, f"only {len(fillers)} filler(s) covered the wait"
+
+    async def test_fillers_stop_once_the_reply_is_ready(self) -> None:
+        """Otherwise the persona stalls three times and then answers."""
+        orchestrator, _, _, _ = build(replies=("Haan beta ek minute. Main likh raha hoon.",))
+        spoken: list[str] = []
+        original = orchestrator._speaker.speak
+
+        async def record(request: object, **kwargs: object) -> float | None:
+            spoken.append(request.text)  # type: ignore[attr-defined]
+            return await original(request, **kwargs)  # type: ignore[arg-type]
+
+        orchestrator._speaker.speak = record  # type: ignore[method-assign]
+        await orchestrator.run(audio(speech_frames=8, silence_frames=4, bursts=1))
+
+        fillers = [text for text in spoken if text in persona_fillers(LEAD_PERSONA)]
+        assert len(fillers) <= MAX_FILLERS_PER_TURN
+
+    async def test_the_cap_is_honoured_when_the_model_never_answers(self) -> None:
+        """A dead model must not produce an endless stall."""
+        orchestrator, _, _, _ = build()
+        spoken: list[str] = []
+        original = orchestrator._speaker.speak
+
+        async def record(request: object, **kwargs: object) -> float | None:
+            spoken.append(request.text)  # type: ignore[attr-defined]
+            return await original(request, **kwargs)  # type: ignore[arg-type]
+
+        orchestrator._speaker.speak = record  # type: ignore[method-assign]
+        orchestrator._llm = SilentLLM()  # type: ignore[assignment]
+        await orchestrator.run(audio(speech_frames=8, silence_frames=4, bursts=1))
+
+        fillers = [text for text in spoken if text in persona_fillers(LEAD_PERSONA)]
+        assert 1 <= len(fillers) <= MAX_FILLERS_PER_TURN
+
+    async def test_a_filler_is_recorded_only_when_one_was_needed(self) -> None:
+        """An instant model leaves no gap to cover, and `filler_played` says so.
+
+        Reporting a filler that never played would be a fabricated number on the dashboard -
+        the same class of mistake as the barge-in count that was removed in Phase 4.
+        """
+        instant, recorder, _, _ = build()
+        await instant.run(audio(speech_frames=8, silence_frames=4, bursts=1))
+        fast = [e for e in recorder.history() if e.type is EventType.LATENCY]
+        assert fast
+        assert not any(e.filler_played for e in fast)
+
+    async def test_a_slow_model_does_record_a_filler(self) -> None:
+        slow, recorder, _, _ = build()
+        slow._llm = SlowLLM("Haan beta, main sun raha hoon. Aap boliye na.")  # type: ignore[assignment]
+        await slow.run(audio(speech_frames=8, silence_frames=4, bursts=1))
+        events = [e for e in recorder.history() if e.type is EventType.LATENCY]
+        assert events
+        assert any(e.filler_played for e in events)

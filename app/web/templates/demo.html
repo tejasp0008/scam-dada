@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scam Dada — live control room</title>
+<link rel="stylesheet" href="/static/demo.css">
+</head>
+<body>
+<div class="shell">
+
+  <div class="topbar">
+    <div class="brand"><b>Scam&nbsp;Dada</b><span>live control room</span></div>
+    <span class="chip" id="chip-state"><i class="dot"></i><span id="state-text">standing by</span></span>
+    <span class="chip" id="chip-stage">stage —</span>
+    <span class="chip" id="chip-call">no call</span>
+    <div class="spacer"></div>
+    <span class="chip" id="chip-providers">—</span>
+  </div>
+
+  <div class="body">
+
+    <!-- left rail: you, the scammer -->
+    <div class="rail">
+      <button class="btn primary" id="btn-start">Answer as the scammer</button>
+      <button class="btn stop" id="btn-stop" disabled>Hang up</button>
+
+      <div class="warn-box" id="echo-warn">
+        <b>Wear headphones.</b> On speakers, Dada's own room tone feeds back into your
+        microphone and the barge-in detector cuts him off mid-sentence.
+      </div>
+
+      <div class="speaking" id="speaking" data-who="idle">
+        <div class="label">Who is speaking</div>
+        <div class="who">
+          <span class="bars" id="bars"><i></i><i></i><i></i><i></i><i></i></span>
+          <span id="who-text">nobody</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Your microphone</h3>
+        <div class="meter"><i id="mic-level"></i></div>
+        <div class="kv" style="margin-top:10px"><span>Input</span><span id="mic-device">—</span></div>
+      </div>
+
+      <div class="card">
+        <h3>This call's canary</h3>
+        <div class="kv"><span>Name</span><span id="canary-name">—</span></div>
+        <div class="kv"><span>Handle</span><span id="canary-handle">—</span></div>
+        <p class="empty" style="margin:9px 0 0; font-size:12.5px">
+          Fictional, and unique to this call. If it ever turns up on a later one, those two
+          calls share a lead list.
+        </p>
+      </div>
+
+      <div class="card">
+        <h3>Last turn, milliseconds</h3>
+        <div class="kv"><span>Speech → transcript</span><span class="num" id="l-stt">—</span></div>
+        <div class="kv"><span>Reply, first token</span><span class="num" id="l-llm">—</span></div>
+        <div class="kv"><span>Voice, first audio</span><span class="num" id="l-tts">—</span></div>
+        <div class="kv"><span>Filler covered it</span><span id="l-filler">—</span></div>
+      </div>
+    </div>
+
+    <!-- right: the dashboard -->
+    <div class="stage-area">
+
+      <div class="tiles">
+        <div class="tile" id="tile-wasted">
+          <div class="label">Scammer time wasted</div>
+          <div class="value num" id="t-wasted">0:00</div>
+          <div class="sub" id="t-wasted-sub">not started</div>
+        </div>
+        <div class="tile" id="tile-turns">
+          <div class="label">Turns taken</div>
+          <div class="value num" id="t-turns">0</div>
+          <div class="sub">his words, then ours</div>
+        </div>
+        <div class="tile" id="tile-entities">
+          <div class="label">Identifiers captured</div>
+          <div class="value num" id="t-entities">0</div>
+          <div class="sub">regex + model</div>
+        </div>
+        <div class="tile" id="tile-risk">
+          <div class="label">Hang-up risk</div>
+          <div class="value num" id="t-risk">0%</div>
+          <div class="sub" id="t-risk-sub">he is not going anywhere</div>
+        </div>
+      </div>
+
+      <div id="leak-slot"></div>
+
+      <div class="card">
+        <h3>Where he is in the script</h3>
+        <div class="ladder" id="ladder"></div>
+        <div class="gauge">
+          <div class="head"><span>Pressure he is applying</span><b class="num" id="g-pressure">0%</b></div>
+          <div class="bar"><i id="bar-pressure" style="background:var(--warn)"></i></div>
+          <div class="signals" id="sig-pressure"></div>
+        </div>
+        <div class="gauge">
+          <div class="head"><span>Risk he hangs up</span><b class="num" id="g-risk">0%</b></div>
+          <div class="bar"><i id="bar-risk" style="background:var(--danger)"></i></div>
+          <div class="signals" id="sig-risk"></div>
+        </div>
+      </div>
+
+      <div class="grid2">
+        <div class="card">
+          <h3>Transcript</h3>
+          <div class="transcript" id="transcript">
+            <p class="empty">Press answer, then talk as the scammer. Dada picks up.</p>
+          </div>
+        </div>
+        <div class="card">
+          <h3>Intelligence captured</h3>
+          <div class="entities" id="entities">
+            <p class="empty">Nothing yet. UPI handles, names, case numbers and amounts land here.</p>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="footnote">
+    Every identifier this system issues is fictional: phone numbers begin <code>00</code> and
+    cannot be dialled, payment handles are on a non-existent provider, bank codes are
+    unallocated. Speech by Gnani <b>Prisma v3.0</b> and <b>Timbre v3.0</b>.
+  </div>
+
+</div>
+
+<script src="/static/demo.js"></script>
+</body>
+</html>

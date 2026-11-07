@@ -899,3 +899,83 @@ six persona turns, both personas, stage timeline `authority → fear → payment
 0.85, six identifiers with their provenance, and one identity leak attributed back to the
 call that issued it. Latency over six turns: transcript median 519 ms, first token 273 ms
 (p95 1394), first audio 472 ms.
+
+## 0027 — The demo page, and the token budget that makes a live call possible
+*2026-11-07 · demo hardening*
+
+**Groq's rate limits are per model, not per account.** The two 429s on 2026-11-06 quoted
+different limits for different models — 7000 ITPM for `qwen/qwen3.8-27b`, 8000 TPM for
+`openai/gpt-oss-120b`. So the single most effective change was not a prompt edit at all:
+`LLM_ANALYSIS_MODEL=openai/gpt-oss-120b` gives the analysis pass its own budget and stops it
+competing with the dialogue the caller can actually hear.
+
+**Prompt sizes, measured with `tiktoken` (`cl100k_base`), not estimated:**
+
+| | before | after |
+|---|---|---|
+| Dada system prompt | 1641 | **1016** (−38%) |
+| Grandson system prompt | 1316 | **876** (−33%) |
+| Analysis prompt | 686 | **605** |
+| History ceiling | ~1000 | **~550** (4000 → 2200 chars) |
+
+What went was repetition, not content: all eight ethics constraints, every character detail
+and every speech rule survive, and the per-persona tests still assert the six named
+constraints, the eight-word floor and the no-opening-tag rule. The digest pin on
+`ethics.v1.md` failed the moment the file changed, which is exactly what it is for — the new
+digest was recorded deliberately rather than the test being loosened.
+
+Trimming the **history** mattered as much as trimming the prompt: at 4000 characters it cost
+roughly as many tokens per turn as the system message. Five exchanges is ample for staying in
+character, and the scammer's opening pitch has been extracted by the analysis layer by then.
+
+Per dialogue turn is now ~1566 tokens against qwen's own 7000 ITPM: about four turns a
+minute, one every 13 seconds. A natural cycle with Dada is ~16 seconds — his reply is 10 of
+them — so a live conversation now fits inside the budget where before it did not.
+
+**Fillers now cover the whole wait, not the first two seconds.** This needed the transport
+understood properly. A cached filler is served from disk and `speak` returns as soon as the
+bytes reach the socket, so the audio is *queued*, not played — the browser's ring buffer does
+the pacing. Queue three at once and the persona stalls three times and then answers; queue
+one and wait, and the line goes silent the moment it ends if the model is slower than one
+phrase. So the loop paces itself by the audio it just handed over: hand over a filler, wait
+almost that long, reach for another only if the reply still is not ready. Capped at three.
+
+`filler_played` stays false when the model answered instantly, because reporting a filler
+that never played would be the same class of fabricated number as the barge-in count removed
+in Phase 4.
+
+### The page
+
+`/demo` is one screen for the camera: microphone, who-is-speaking and the echo warning on
+the left, the dashboard on the right. It reuses the simulator's transport and the dashboard's
+event handling rather than adding a third — the same `/ws/call` socket, the same worklets,
+the same event payloads. What is new is presentation.
+
+**Where the visual direction came from.** Three families of reference, and what was taken:
+
+* **SOC and threat consoles** — layered dark surfaces built up from a near-black base rather
+  than inverted light ones (`#0a0c10` → `#12161d` → `#1a1f29`), and red and amber reserved
+  strictly for severity so a red pixel always means something.
+* **Call-centre wallboards** — six to eight metrics at most, because a board showing
+  everything stops being read, and the number you act on largest and highest. "Readable from
+  across a room" is the same constraint as "readable in a phone-sized video".
+* **The Bloomberg terminal** — tabular numerals everywhere a number changes, because
+  proportional digits make a live counter visibly jitter as it ticks; in-place updates rather
+  than re-layouts; and a brief colour wash on a changed value, which draws the eye without
+  moving anything.
+
+**Motion is decoration, and every state it conveys is also stated in text.** So it is
+switched off wholesale under `prefers-reduced-motion`, and under `?still=1` — which exists
+because headless Chrome does not advance CSS transitions, so a screenshot without it captures
+half-faded panels and an unlit stage ladder. That was discovered by taking the screenshot.
+
+**`/demo?replay=<call_id>` plays a finished call back through the same panels.** This is the
+replay mode deferred from Phase 2, and it earns its place three times over: rehearsing the
+visuals without talking, showing the page on a machine with no microphone, and proving the
+panels cannot drift from the record because they are driven by it. It falls back to
+reconstructing a stream from the report when Redis has expired the event log.
+
+**The echo warning is not decorative.** On speakers, the persona's own room tone reaches the
+microphone and trips the barge-in detector, cutting Dada off mid-sentence — the single most
+likely way a live demo goes wrong. The page inspects the track label and
+`echoCancellation` setting and says which of the three situations it is in.

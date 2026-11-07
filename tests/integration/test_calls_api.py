@@ -445,3 +445,76 @@ class TestNoFabricatedNumbers:
         earlier = next(c for c in seeded.get("/api/calls").json() if c["call_id"] == EARLIER)
         assert earlier["stage_reached"] is None
         assert earlier["entity_count"] == 0
+
+
+class TestDemoPage:
+    """The page the demo video films. Mostly a contract check: a panel that silently stops
+    handling an event type is an event nobody can see, which is worse than no event."""
+
+    def test_the_page_is_served(self, call_client: TestClient) -> None:
+        page = call_client.get("/demo")
+        assert page.status_code == 200
+        assert "live control room" in page.text
+
+    def test_its_assets_are_served(self, call_client: TestClient) -> None:
+        for path in ("/static/demo.css", "/static/demo.js"):
+            assert call_client.get(path).status_code == 200, path
+
+    def test_it_handles_every_event_type_the_orchestrator_emits(
+        self, call_client: TestClient
+    ) -> None:
+        js = call_client.get("/static/demo.js").text
+        for kind in (
+            "transcript",
+            "stage",
+            "risk",
+            "entity",
+            "canary_match",
+            "latency",
+            "persona_handoff",
+        ):
+            assert f'"{kind}"' in js, kind
+
+    def test_it_warns_about_echo(self, call_client: TestClient) -> None:
+        """On speakers the persona's own room tone trips the barge-in detector."""
+        page = call_client.get("/demo").text
+        assert "headphones" in page.lower()
+        assert "checkEcho" in call_client.get("/static/demo.js").text
+
+    def test_it_shows_which_machine_found_an_entity(self, call_client: TestClient) -> None:
+        js = call_client.get("/static/demo.js").text
+        assert "event.source" in js
+        assert "regex" in js
+
+    def test_it_labels_an_unmeasurable_latency_leg_rather_than_showing_zero(
+        self, call_client: TestClient
+    ) -> None:
+        js = call_client.get("/static/demo.js").text
+        assert "fmtMs" in js
+
+    def test_it_states_that_issued_identifiers_are_fictional(self, call_client: TestClient) -> None:
+        """It is the frame that ends up on LinkedIn, so it has to say so on its own face."""
+        page = call_client.get("/demo").text
+        assert "fictional" in page
+        assert "cannot be dialled" in page
+
+    def test_it_names_the_gnani_models(self, call_client: TestClient) -> None:
+        page = call_client.get("/demo").text
+        assert "Prisma v3.0" in page
+        assert "Timbre v3.0" in page
+
+    def test_motion_can_be_switched_off(self, call_client: TestClient) -> None:
+        """For reduced-motion users, and so a headless screenshot is deterministic."""
+        css = call_client.get("/static/demo.css").text
+        assert "prefers-reduced-motion" in css
+        assert "body.still" in css
+
+    def test_it_can_replay_a_recorded_call(self, seeded: TestClient) -> None:
+        """Rehearsing the visuals without talking, and proof the panels are driven by the
+        record rather than by a parallel code path."""
+        js = seeded.get("/static/demo.js").text
+        assert "function replay(" in js
+        assert "/api/calls/" in js
+        # The endpoints replay depends on must exist.
+        assert seeded.get(f"/api/calls/{CALL}").status_code == 200
+        assert seeded.get(f"/api/calls/{CALL}/events?after_seq=-1").status_code == 200

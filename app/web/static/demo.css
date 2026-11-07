@@ -1,0 +1,290 @@
+/* Scam Dada — control room.
+ *
+ * Design direction and where it comes from, since the brief asked:
+ *
+ *  - SOC consoles: layered dark surfaces built up from a near-black base rather than
+ *    inverted light ones, and red/amber reserved strictly for severity so a red pixel
+ *    always means something. Base #0a0c10, card #12161d, raised #1a1f29.
+ *  - Call-centre wallboards: six to eight metrics at most, the number you act on largest
+ *    and highest, readable from across a room - which is the same constraint as readable
+ *    in a phone-sized video.
+ *  - Bloomberg terminal: tabular numerals everywhere a number changes, because column
+ *    alignment is load-bearing and proportional digits make a live counter visibly jitter.
+ *    In-place updates, never re-layouts.
+ */
+
+:root {
+  --bg: #0a0c10;
+  --surface: #12161d;
+  --raised: #1a1f29;
+  --line: #242b37;
+  --line-bright: #333d4d;
+
+  --text: #eef1f6;
+  --text-dim: #97a1b4;
+  --text-faint: #65708430;
+
+  --accent: #4da3ff;          /* system / neutral emphasis */
+  --caller: #ffa94d;          /* the scammer */
+  --persona: #4ade80;         /* Dada and the grandson */
+  --danger: #ff5c54;          /* severity only */
+  --warn: #ffd43b;
+
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, system-ui, sans-serif;
+
+  --r: 12px;
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Every changing number gets tabular figures. A live counter in proportional digits
+ * visibly shifts width as it ticks, which reads as instability on camera. */
+.num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; }
+
+/* ---------- shell ---------- */
+
+.shell { display: flex; flex-direction: column; height: 100%; }
+
+.topbar {
+  display: flex; align-items: center; gap: 16px;
+  padding: 14px 22px;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, #11151c, #0d1116);
+}
+
+.brand { display: flex; align-items: baseline; gap: 10px; }
+.brand b { font-size: 19px; font-weight: 700; letter-spacing: -0.01em; }
+.brand span { color: var(--text-dim); font-size: 13px; letter-spacing: .04em; text-transform: uppercase; }
+
+.spacer { flex: 1; }
+
+.chip {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 12.5px; font-weight: 600;
+  padding: 5px 11px; border-radius: 999px;
+  border: 1px solid var(--line-bright); color: var(--text-dim);
+  background: #0e1218;
+  white-space: nowrap;
+}
+.chip .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.chip.live   { color: var(--persona); border-color: #2c6b45; }
+.chip.live .dot { animation: pulse 1.6s var(--ease) infinite; }
+.chip.caller { color: var(--caller); border-color: #7a5420; }
+.chip.danger { color: var(--danger); border-color: #7a2e2b; }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: .35; transform: scale(.8); }
+}
+
+.body { flex: 1; display: grid; grid-template-columns: 340px 1fr; min-height: 0; }
+
+/* ---------- left rail: the operator's controls ---------- */
+
+.rail {
+  border-right: 1px solid var(--line);
+  padding: 18px;
+  display: flex; flex-direction: column; gap: 16px;
+  overflow-y: auto;
+  background: #0b0e13;
+}
+
+.btn {
+  display: block; width: 100%;
+  font: inherit; font-size: 15px; font-weight: 650;
+  padding: 13px 16px; border-radius: 10px;
+  border: 1px solid var(--line-bright);
+  background: var(--raised); color: var(--text);
+  cursor: pointer;
+  transition: transform .12s var(--ease), border-color .2s, background .2s;
+}
+.btn:hover:not(:disabled) { border-color: var(--accent); }
+.btn:active:not(:disabled) { transform: translateY(1px); }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+.btn.primary {
+  background: linear-gradient(180deg, #4da3ff, #2f87e8);
+  border-color: #2f87e8; color: #05101d;
+}
+.btn.stop { border-color: #7a2e2b; color: var(--danger); background: #170f10; }
+
+/* Who is speaking. The single most useful indicator on camera: it tells a viewer
+ * instantly whether the machine is listening or talking. */
+.speaking {
+  border: 1px solid var(--line); border-radius: var(--r);
+  background: var(--surface); padding: 16px;
+}
+.speaking .label { font-size: 11px; text-transform: uppercase; letter-spacing: .1em; color: var(--text-dim); }
+.speaking .who {
+  font-size: 22px; font-weight: 700; margin-top: 6px;
+  display: flex; align-items: center; gap: 10px;
+  transition: color .2s;
+}
+.speaking .who .bars { display: flex; gap: 3px; align-items: flex-end; height: 20px;
+  transition: opacity .2s var(--ease); }
+.speaking .who .bars i {
+  width: 3px; background: currentColor; border-radius: 2px; height: 4px;
+  transition: height .08s linear;
+}
+.speaking[data-who="you"]     .who { color: var(--caller); }
+.speaking[data-who="persona"] .who { color: var(--persona); }
+.speaking[data-who="idle"]    .who { color: var(--text-dim); }
+
+.meter { height: 8px; background: #0c1014; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+.meter > i { display: block; height: 100%; width: 0; background: var(--caller); transition: width .06s linear; }
+
+.card {
+  border: 1px solid var(--line); border-radius: var(--r);
+  background: var(--surface); padding: 15px 16px;
+}
+.card h3 {
+  margin: 0 0 11px; font-size: 11px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .1em; color: var(--text-dim);
+}
+.kv { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; font-size: 14px; }
+.kv span:last-child { color: var(--text-dim); }
+
+.warn-box {
+  border: 1px solid #7a5420; background: #1b1405; border-radius: 10px;
+  padding: 12px 14px; font-size: 13.5px; color: #ffd9a0;
+}
+.warn-box b { color: var(--warn); }
+.warn-box.ok { border-color: #2c6b45; background: #08160e; color: #a7e9c0; }
+.warn-box.ok b { color: var(--persona); }
+
+/* ---------- right: the dashboard ---------- */
+
+.stage-area { padding: 18px 22px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; }
+
+.tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+@media (max-width: 1250px) { .tiles { grid-template-columns: repeat(2, 1fr); } }
+
+.tile {
+  border: 1px solid var(--line); border-radius: var(--r);
+  background: linear-gradient(180deg, var(--surface), #0f1318);
+  padding: 15px 17px;
+  position: relative; overflow: hidden;
+}
+.tile .label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .1em; color: var(--text-dim); }
+.tile .value { font-size: 40px; font-weight: 700; line-height: 1.05; margin-top: 7px; letter-spacing: -0.02em; }
+.tile .sub { font-size: 12.5px; color: var(--text-dim); margin-top: 3px; }
+.tile.hot .value { color: var(--danger); }
+
+/* A tile that just changed gets one brief wash of colour. Borrowed from the terminal
+ * convention of flashing a changed value: it draws the eye without moving anything. */
+.tile.flash::after {
+  content: ""; position: absolute; inset: 0;
+  background: radial-gradient(circle at 20% 0%, #4da3ff22, transparent 70%);
+  animation: wash .9s var(--ease) forwards;
+}
+@keyframes wash { from { opacity: 1; } to { opacity: 0; } }
+
+.grid2 { display: grid; grid-template-columns: 1.15fr 1fr; gap: 16px; align-items: start; }
+@media (max-width: 1250px) { .grid2 { grid-template-columns: 1fr; } }
+
+/* stage ladder */
+.ladder { display: flex; gap: 6px; }
+.rung {
+  flex: 1; text-align: center; padding: 9px 4px;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: #0d1116; color: var(--text-dim);
+  font-size: 11.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em;
+  transition: background .35s var(--ease), color .35s var(--ease), border-color .35s var(--ease);
+}
+.rung.on { background: #15314f; border-color: #2f6ba8; color: #cfe6ff; }
+.rung.on.last { background: #3c1512; border-color: #8a3630; color: #ffd6d2; }
+
+/* gauges */
+.gauge { margin-top: 14px; }
+.gauge .head { display: flex; justify-content: space-between; font-size: 13.5px; margin-bottom: 6px; }
+.gauge .head b { font-size: 17px; }
+.bar { height: 10px; background: #0c1014; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.bar > i { display: block; height: 100%; width: 0; transition: width .5s var(--ease), background .5s; }
+.signals { font-size: 12.5px; color: var(--text-dim); margin-top: 8px; min-height: 19px; }
+
+/* transcript */
+.transcript { max-height: 38vh; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+.turn { animation: slide-in .35s var(--ease) both; }
+.turn .who { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; }
+.turn .text { font-size: 15.5px; margin-top: 2px; }
+.turn.caller  .who { color: var(--caller); }
+.turn.persona .who { color: var(--persona); }
+.turn.system  .who { color: var(--accent); }
+.turn.system  .text { color: var(--text-dim); font-style: italic; }
+
+@keyframes slide-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* entities */
+.entities { display: flex; flex-direction: column; gap: 8px; max-height: 30vh; overflow-y: auto; }
+.entity {
+  display: flex; align-items: baseline; gap: 10px;
+  border: 1px solid var(--line); border-left: 3px solid var(--accent);
+  border-radius: 8px; background: var(--raised); padding: 9px 12px;
+  animation: slide-left .45s var(--ease) both;
+}
+.entity.llm { border-left-color: #a78bfa; }
+.entity .kind { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--text-dim); min-width: 108px; }
+.entity .val { font-family: var(--mono); font-size: 14.5px; font-weight: 600; }
+.entity .src { margin-left: auto; font-size: 10.5px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .06em; }
+
+@keyframes slide-left {
+  from { opacity: 0; transform: translateX(22px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* the leak alert: the loudest thing on the page, and the only thing allowed to be */
+.leak-alert {
+  border: 1px solid var(--danger); border-radius: var(--r);
+  background: linear-gradient(180deg, #2a0f0d, #1a0b0a);
+  padding: 16px 18px;
+  animation: alarm .7s var(--ease) 2, slide-in .4s var(--ease) both;
+}
+.leak-alert .head {
+  display: flex; align-items: center; gap: 9px;
+  font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .12em;
+  color: var(--danger);
+}
+.leak-alert .what { font-size: 20px; font-weight: 700; margin-top: 8px; font-family: var(--mono); }
+.leak-alert .why { font-size: 13.5px; color: #ffbdb8; margin-top: 5px; }
+
+@keyframes alarm {
+  0%, 100% { box-shadow: 0 0 0 0 #ff5c5400; }
+  50%      { box-shadow: 0 0 0 7px #ff5c5426; }
+}
+
+.empty { color: var(--text-dim); font-size: 14px; }
+
+.footnote { font-size: 12px; color: var(--text-dim); padding: 0 22px 16px; }
+.footnote code { font-family: var(--mono); background: #0e1218; padding: 1px 5px; border-radius: 4px; }
+
+/* Motion is decoration here: every state it conveys is also stated in text. So it is
+ * switched off wholesale for anyone who asks for reduced motion, and for `?still=1`, which
+ * exists because a headless screenshot does not advance CSS transitions and would otherwise
+ * capture half-faded panels and an unlit stage ladder. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+body.still *, body.still *::before, body.still *::after {
+  animation: none !important;
+  transition: none !important;
+}

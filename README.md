@@ -49,8 +49,10 @@ Built for the Great Indian AI Internship Challenge on Gnani's speech models.
 | **LLM analysis** | A validated-JSON second opinion that adds what regex cannot see, never blocks the dialogue path, and degrades to the keyword pass when the model is down |
 | **Control room** | `/dashboard` — live call list, stage ladder, pressure and risk gauges with their signals, transcript, extracted intelligence with provenance, per-turn latency |
 | **Read API** | `/api/calls`, `/api/calls/{id}`, and `/api/calls/{id}/events?after_seq=` for a dashboard that reconnected mid-call |
+| **Live demo page** | `/demo` — microphone, who-is-speaking and an echo warning on the left, the live dashboard on the right. One screen, one call, no tab switching |
+| **Replay** | `/demo?replay=<call_id>` plays a finished call back through the same panels, so the visuals can be rehearsed without talking |
 | **Evidence pack** | HTML and PDF per call: headline minutes wasted, every identifier with the machine that found it, identity leaks, latency distribution, full transcript |
-| Tests | 1115 offline + 64 contract, `ruff` and `mypy` clean (`mypy --strict` on `core` and `providers`) |
+| Tests | 1140 offline + 64 contract, `ruff` and `mypy` clean (`mypy --strict` on `core` and `providers`) |
 
 Measured on two consecutive live calls through the orchestrator (2026-11-06), per turn,
 from the caller stopping speaking:
@@ -171,7 +173,7 @@ cp .env.example .env     # then fill in GNANI_API_KEY and the LLM_* values
 make install             # venv on 3.11 + dev dependencies
 make up                  # postgres + redis
 make migrate             # apply the baseline schema
-make test                # 1115 tests, offline, zero API cost
+make test                # 1140 tests, offline, zero API cost
 make dev                 # api on http://localhost:8000
 ```
 
@@ -186,7 +188,8 @@ curl localhost:8000/readyz
 demo-day misconfiguration (mock TTS still selected) is one request away rather than a
 surprise on stage.
 
-Three pages: `/` is the call simulator, `/dashboard` is the control room, and
+Four pages: `/demo` is the live demo screen, `/` is the plain call simulator,
+`/dashboard` is the control room over every call, and
 `/api/calls/{id}/evidence.html` is a call's evidence pack. The PDF version needs
 `pip install -e '.[pdf]'` plus its system libraries (`brew install pango` on macOS); without
 them the route answers 503 and says so, and the HTML pack needs neither.
@@ -265,11 +268,10 @@ real limit.
 - **TTS concurrency is one.** Timbre refuses a second active request per API key with
   `429 Only 1 active request is allowed at a time`, so synthesis is serialised in the
   adapter. Two simultaneous calls would queue behind each other (DECISIONS 0023).
-- **Groq's token limit caps call pace, and analysis competes for it.** Dialogue and analysis
-  share one account at 8000 tokens a minute — roughly 1600 input tokens of dialogue plus
-  1200 of analysis per turn. Running both every turn throttled the *dialogue* model, which
-  the caller hears, so analysis now runs every second caller turn. Trimming the 6.2 KB
-  system prompt is still the obvious further fix and has not been done (DECISIONS 0025).
+- **Groq's token limit caps call pace**, but the limits are *per model*, so analysis runs on
+  a different one and no longer competes with dialogue. After trimming, a dialogue turn is
+  ~1566 tokens against qwen's 7000 ITPM: about four turns a minute, one every 13 s, against
+  a natural cycle of roughly 16 s. It fits, with little headroom (DECISIONS 0027).
 - **The scam stage shown is the keyword reading, not the model's.** Where they disagree the
   model's answer is carried alongside rather than merged, so the dashboard can show a
   conflict. The keyword pass is reproducible; the model is not.

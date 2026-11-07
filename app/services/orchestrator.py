@@ -80,6 +80,14 @@ logger = logging.getLogger(__name__)
 #: internally rather than applying backpressure to the dialogue path.
 AudioSink = Callable[[bytes], Awaitable[None]]
 
+#: Most stall phrases queued while waiting for one reply. A man who says "ek minute" three
+#: times is still an old man; one who says it eight times is a loop.
+MAX_FILLERS_PER_TURN = 3
+
+#: Queue the next filler this long before the current one runs out, so the browser's buffer
+#: never actually empties. Smaller than one filler and larger than a round trip to Timbre.
+FILLER_LEAD_SECONDS = 0.45
+
 #: How long teardown waits for a reply that is already in flight. The caller's audio ending
 #: does not mean the persona has finished its sentence, and cutting it off mid-word is worse
 #: than a slightly later close.
@@ -460,7 +468,9 @@ class CallOrchestrator:
 
     async def _reply(self, latency: TurnLatency) -> None:
         """Generate and speak one persona turn."""
-        filler = asyncio.create_task(self._play_filler(latency))
+        # Set the moment the first real sentence exists, which is what stops the fillers.
+        ready = asyncio.Event()
+        filler = asyncio.create_task(self._cover_silence(latency, ready))
         spoken: list[str] = []
         buffer = ""
         sentences = 0
@@ -478,6 +488,7 @@ class CallOrchestrator:
                     if split is None:
                         break
                     sentence, buffer = split
+                    ready.set()
                     await self._await_filler(filler)
                     await self._speak(sentence, latency, spoken)
                     sentences += 1
@@ -488,6 +499,7 @@ class CallOrchestrator:
             # degradation: the persona has stalled rather than gone silent.
             logger.warning("dialogue generation failed", extra={"error": str(exc)})
 
+        ready.set()
         await self._await_filler(filler)
         if sentences < self._config.max_reply_sentences and (tail := flush_tail(buffer)):
             await self._speak(tail, latency, spoken)
@@ -496,16 +508,39 @@ class CallOrchestrator:
             await self._record_persona_turn(" ".join(spoken), latency)
         await self._emit_latency(latency)
 
-    async def _play_filler(self, latency: TurnLatency) -> None:
-        """Speak a cached stall phrase while the model is still generating."""
+    async def _cover_silence(self, latency: TurnLatency, ready: asyncio.Event) -> None:
+        """Keep stall phrases going until the first real sentence exists.
+
+        One filler is not enough. A cached filler is served from disk and `speak` returns as
+        soon as the bytes are handed to the transport, so the audio is *queued*, not played -
+        the browser's ring buffer does the pacing. Queue three at once and the persona stalls
+        three times and then answers; queue one and wait, and the line goes silent the moment
+        that one finishes if the model is slower than about two seconds.
+
+        So this paces itself by the audio it just queued: hand over a filler, wait almost that
+        long, and only reach for another if the reply still is not ready. The browser's buffer
+        never empties and never holds more than one spare phrase.
+        """
         rotation = self._rotation_for(self._persona)
-        try:
-            await self._speaker.speak(self._tts_request(rotation.next()), profile=self.profile())
-        except ProviderError as exc:
-            # A filler is a nicety. Losing it costs a second of silence, not the call.
-            logger.info("filler playback failed", extra={"error": str(exc)})
+        for _ in range(MAX_FILLERS_PER_TURN):
+            if ready.is_set():
+                return
+            try:
+                await self._speaker.speak(
+                    self._tts_request(rotation.next()), profile=self.profile()
+                )
+            except ProviderError as exc:
+                # A filler is a nicety. Losing it costs a second of silence, not the call.
+                logger.info("filler playback failed", extra={"error": str(exc)})
+                return
+            latency.filler_played = True
+
+            queued = max(0.0, self._speaker.last_audio_seconds - FILLER_LEAD_SECONDS)
+            try:
+                await asyncio.wait_for(ready.wait(), timeout=queued)
+            except TimeoutError:
+                continue  # still nothing to say; stall again
             return
-        latency.filler_played = True
 
     async def _await_filler(self, filler: asyncio.Task[None]) -> None:
         """Let the filler finish before the real reply starts, so they do not overlap."""

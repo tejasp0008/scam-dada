@@ -28,5 +28,13 @@ async def simulator(request: Request) -> HTMLResponse:
 
 @router.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(request: Request) -> HTMLResponse:
-    """The control room. This is the page the demo video films."""
+    """The control room: every call, live or finished, with its evidence pack."""
     return TEMPLATES.TemplateResponse(request, "dashboard.html")
+
+
+@router.get("/demo", response_class=HTMLResponse)
+async def demo(request: Request) -> HTMLResponse:
+    """One screen for the camera: your microphone on the left, the live dashboard on the
+    right. This is the page the demo video films, so it holds a whole call on its own
+    without the operator having to switch tabs."""
+    return TEMPLATES.TemplateResponse(request, "demo.html")
