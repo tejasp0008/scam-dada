@@ -655,3 +655,43 @@ class TestFillerCoverage:
         events = [e for e in recorder.history() if e.type is EventType.LATENCY]
         assert events
         assert any(e.filler_played for e in events)
+
+
+class TestBargeInGate:
+    """Barge-in needs a higher bar while the persona is audible, because on speakers the
+    microphone hears the persona too and a flush is heard as the persona losing its voice."""
+
+    async def test_a_quiet_echo_does_not_interrupt(self) -> None:
+        """A live call produced four barge-ins in forty seconds and no audible reply."""
+        orchestrator, _, _, _ = build(
+            script=("Pehla.", "Doosra."),
+            replies=("Haan beta ek minute, main likh raha hoon zara dheere boliye na.",),
+            frames_per_utterance=4,
+            chunk_delay_s=0.02,
+        )
+        orchestrator._config.barge_in_rms = 0.5  # far above the echo-level frames below
+        await orchestrator.run(interrupting_audio(orchestrator))
+        assert orchestrator._speaker.interruptions == 0
+
+    async def test_sustained_loud_speech_still_interrupts(self) -> None:
+        orchestrator, _, _, _ = build(
+            script=("Pehla.", "Doosra."),
+            replies=("Haan beta ek minute, main likh raha hoon zara dheere boliye na.",),
+            frames_per_utterance=4,
+            chunk_delay_s=0.02,
+        )
+        orchestrator._config.barge_in_rms = 0.1
+        orchestrator._config.barge_in_frames = 3
+        await orchestrator.run(interrupting_audio(orchestrator, interrupt_frames=20))
+        assert orchestrator._speaker.interruptions > 0
+
+    async def test_it_can_be_switched_off_entirely(self) -> None:
+        orchestrator, _, _, _ = build(
+            script=("Pehla.", "Doosra."),
+            replies=("Haan beta ek minute, main likh raha hoon zara dheere boliye na.",),
+            frames_per_utterance=4,
+            chunk_delay_s=0.02,
+        )
+        orchestrator.set_barge_in(False)
+        await orchestrator.run(interrupting_audio(orchestrator, interrupt_frames=30))
+        assert orchestrator._speaker.interruptions == 0

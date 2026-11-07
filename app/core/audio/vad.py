@@ -15,6 +15,19 @@ import numpy as np
 from app.core.audio.framing import pcm_to_float32
 
 
+def frame_rms(frame: bytes) -> float:
+    """Root-mean-square amplitude of one PCM frame, in [0, 1].
+
+    A free function rather than only a VAD method: the barge-in gate needs a level without
+    needing a detector, and adding `rms` to the `Vad` protocol would oblige every future
+    implementation to expose one - a Silero VAD has no natural notion of it.
+    """
+    samples = pcm_to_float32(frame)
+    if samples.size == 0:
+        return 0.0
+    return float(np.sqrt(np.mean(np.square(samples))))
+
+
 class Vad(Protocol):
     """Frame-by-frame speech detection."""
 
@@ -57,10 +70,7 @@ class EnergyVad:
 
     def rms(self, frame: bytes) -> float:
         """Root-mean-square amplitude of a frame, in [0, 1]."""
-        samples = pcm_to_float32(frame)
-        if samples.size == 0:
-            return 0.0
-        return float(np.sqrt(np.mean(np.square(samples))))
+        return frame_rms(frame)
 
     def is_speech(self, frame: bytes) -> bool:
         loud = self.rms(frame) >= self._threshold

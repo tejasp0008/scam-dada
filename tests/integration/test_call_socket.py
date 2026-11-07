@@ -251,3 +251,31 @@ class TestRoomTone:
         assert "btn-room-tone" in page
         assert "Room tone" in page
         assert "room-tone:" in call_client.get("/static/demo.js").text
+
+
+class TestBargeInToggle:
+    """On speakers the microphone hears the persona, so barge-in can fire on our own voice
+    and flush everything queued - which is heard as the persona having no voice at all."""
+
+    def test_the_ready_message_states_whether_interruptions_are_on(
+        self, call_client: TestClient
+    ) -> None:
+        with call_client.websocket_connect("/ws/call") as socket:
+            assert socket.receive_json()["barge_in"] is True
+            socket.send_text("hangup")
+            drain(socket)
+
+    def test_it_can_be_switched_off_and_on_mid_call(self, call_client: TestClient) -> None:
+        with call_client.websocket_connect("/ws/call") as socket:
+            assert socket.receive_json()["type"] == "ready"
+            socket.send_text("barge-in:off")
+            socket.send_text("barge-in:on")
+            socket.send_text("hangup")
+            control, _ = drain(socket)
+        assert [m["enabled"] for m in control if m["type"] == "barge-in"] == [False, True]
+
+    def test_the_page_offers_the_switch(self, call_client: TestClient) -> None:
+        page = call_client.get("/demo").text
+        assert "btn-barge-in" in page
+        assert "Interruptions" in page
+        assert "barge-in:" in call_client.get("/static/demo.js").text

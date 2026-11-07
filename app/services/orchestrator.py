@@ -28,7 +28,7 @@ from datetime import datetime
 
 from app.core.audio.call_profile import PROFILES_BY_NAME, CallProfile
 from app.core.audio.framing import FrameBuffer
-from app.core.audio.vad import EnergyVad, Vad
+from app.core.audio.vad import EnergyVad, Vad, frame_rms
 from app.core.canary import CanaryMatch
 from app.core.events import (
     CanaryMatchEvent,
@@ -144,6 +144,17 @@ class CallConfig:
     #: Stream room tone between utterances so the line is never digitally silent. The
     #: operator can switch it off mid-call; see `set_room_tone`.
     room_tone: bool = True
+    #: Barge-in while the persona is audible needs a higher bar than ordinary speech
+    #: detection, because on speakers the microphone hears the persona too.
+    #:
+    #: The energy VAD opens on 3 frames above 0.015 - right for "is the caller talking" and
+    #: far too eager for "is the caller talking *over us*", where our own voice is coming
+    #: back through the room. Sustained and loud: 8 frames is 256 ms, which no echo of a
+    #: single word survives, and which a real interruption clears easily.
+    barge_in_enabled: bool = True
+    barge_in_rms: float = 0.06
+    barge_in_frames: int = 8
+
     analysis_enabled: bool = True
     analysis_model: str | None = None
     #: Analyse every Nth caller turn rather than all of them.
@@ -212,6 +223,7 @@ class CallOrchestrator:
         self._caller_stopped_at: float | None = None
         self._session: RotatingSttSession | None = None
         self._was_speaking = False
+        self._loud_run = 0
         self._rotations: dict[PersonaId, FillerRotation] = {}
         self._analyst = CallAnalyst(llm, model=config.analysis_model)
         self._canary = canary or CanaryRegistry(config.call_id)
@@ -335,7 +347,7 @@ class CallOrchestrator:
                 # utterance costs a transcript, a seam in a silence costs nothing.
                 session.hold_rotation = speaking_now
 
-                if speaking_now and not self._was_speaking and self._persona_audible():
+                if await self._should_barge_in(frame, speaking_now):
                     await self._barge_in()
                 if self._was_speaking and not speaking_now:
                     # The only end-of-speech signal there is: Prisma does not emit
@@ -343,6 +355,44 @@ class CallOrchestrator:
                     self._caller_stopped_at = self._clock()
                 self._was_speaking = speaking_now
                 await session.send_audio(frame)
+
+    async def _should_barge_in(self, frame: bytes, speaking_now: bool) -> bool:
+        """Whether this frame is the caller genuinely talking over the persona.
+
+        Not simply "the VAD opened while we were speaking". On speakers the microphone hears
+        the persona, so that test fires on our own voice coming back through the room - and
+        because a barge-in flushes everything queued, the caller then hears almost nothing
+        at all. A live call produced four of them in forty seconds and no audible reply.
+
+        So while the persona is audible the bar is raised: sustained speech, well above the
+        level a room echo returns. Headphones remove the problem entirely, which is what the
+        page says; this makes speakers survivable rather than good.
+        """
+        if not self._config.barge_in_enabled or not self._persona_audible():
+            self._loud_run = 0
+            return False
+        if frame_rms(frame) >= self._config.barge_in_rms and speaking_now:
+            self._loud_run += 1
+        else:
+            self._loud_run = 0
+        if self._loud_run < self._config.barge_in_frames:
+            return False
+        self._loud_run = 0
+        return True
+
+    @property
+    def barge_in_enabled(self) -> bool:
+        """Whether the caller can interrupt the persona."""
+        return self._config.barge_in_enabled
+
+    def set_barge_in(self, enabled: bool) -> None:
+        """Turn barge-in on or off mid-call."""
+        self._config.barge_in_enabled = enabled
+        self._loud_run = 0
+        logger.info(
+            "barge-in toggled",
+            extra={"call_id": self._config.call_id, "enabled": enabled},
+        )
 
     def _persona_audible(self) -> bool:
         """Whether the caller can currently hear the persona.
@@ -601,7 +651,16 @@ class CallOrchestrator:
 
         if spoken:
             await self._record_persona_turn(" ".join(spoken), latency)
-        await self._emit_latency(latency)
+            await self._emit_latency(latency)
+        else:
+            # Nothing reached the caller - the model produced nothing, synthesis failed, or
+            # the whole reply was cut off. Reporting "first token 300 ms" for a turn he
+            # never heard would put a timing on the dashboard for speech that does not
+            # exist, which is the same mistake as recording the text.
+            logger.info(
+                "turn produced no audible reply",
+                extra={"call_id": self._config.call_id, "interrupted": interrupted},
+            )
 
     async def _cover_silence(self, latency: TurnLatency, ready: asyncio.Event) -> None:
         """Keep stall phrases going until the first real sentence exists.

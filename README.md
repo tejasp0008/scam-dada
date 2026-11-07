@@ -53,7 +53,7 @@ Built for the Great Indian AI Internship Challenge on Gnani's speech models.
 | **Live demo page** | `/demo` — microphone, who-is-speaking and an echo warning on the left, the live dashboard on the right. One screen, one call, no tab switching |
 | **Replay** | `/demo?replay=<call_id>` plays a finished call back through the same panels, so the visuals can be rehearsed without talking |
 | **Evidence pack** | HTML and PDF per call: headline minutes wasted, every identifier with the machine that found it, identity leaks, latency distribution, full transcript |
-| Tests | 1170 offline + 64 contract, `ruff` and `mypy` clean (`mypy --strict` on `core` and `providers`) |
+| Tests | 1176 offline + 64 contract, `ruff` and `mypy` clean (`mypy --strict` on `core` and `providers`) |
 
 Measured on two consecutive live calls through the orchestrator (2026-11-06), per turn,
 from the caller stopping speaking:
@@ -174,7 +174,7 @@ cp .env.example .env     # then fill in GNANI_API_KEY and the LLM_* values
 make install             # venv on 3.11 + dev dependencies
 make up                  # postgres + redis
 make migrate             # apply the baseline schema
-make test                # 1170 tests, offline, zero API cost
+make test                # 1176 tests, offline, zero API cost
 make dev                 # api on http://localhost:8000
 ```
 
@@ -273,6 +273,10 @@ real limit.
   a different one and no longer competes with dialogue. After trimming, a dialogue turn is
   ~1566 tokens against qwen's 7000 ITPM: about four turns a minute, one every 13 s, against
   a natural cycle of roughly 16 s. It fits, with little headroom (DECISIONS 0027).
+- **Barge-in and speakers are in tension.** The microphone hears the persona, so barge-in
+  needs a much higher bar while it is speaking: 256 ms of sustained speech above four times
+  the VAD threshold. That makes speakers survivable, not good — headphones are the actual
+  answer, and there is an off switch on the page (DECISIONS 0030).
 - **An interrupted reply is dropped, not recorded.** A sentence cut off by barge-in never
   reaches the transcript or the evidence pack, because recording it would put words in the
   persona's mouth that the caller never heard. The consequence is that a call with heavy

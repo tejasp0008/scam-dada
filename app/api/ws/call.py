@@ -124,6 +124,7 @@ async def call_socket(socket: WebSocket) -> None:
             "sample_rate_in": INBOUND_SAMPLE_RATE,
             "sample_rate_out": OUTBOUND_SAMPLE_RATE,
             "room_tone": orchestrator.room_tone_enabled,
+            "barge_in": orchestrator.barge_in_enabled,
         }
     )
     logger.info("call started", extra={"call_id": call_id, "source": "browser"})
@@ -207,6 +208,12 @@ async def _inbound(socket: WebSocket, orchestrator: CallOrchestrator) -> AsyncIt
             await _say(
                 socket,
                 {"type": "room-tone", "enabled": orchestrator.room_tone_enabled},
+            )
+        elif text.startswith("barge-in:"):
+            orchestrator.set_barge_in(text.split(":", 1)[1] == "on")
+            await _say(
+                socket,
+                {"type": "barge-in", "enabled": orchestrator.barge_in_enabled},
             )
 
 

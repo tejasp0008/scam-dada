@@ -1086,3 +1086,35 @@ Measured on the verification call afterwards: **zero barge-ins, all six caller t
 answered with full multi-sentence replies**, 27.9 s of speech and 47.5 s of room tone across
 78 seconds, 2.5 s of true silence, no talk-over, nothing clipped. Before the fix the same
 script produced five barge-ins and truncated replies.
+
+## 0030 — Barge-in was firing on the persona's own voice
+*2026-11-08 · demo hardening*
+
+Reported as "still cannot listen to Dada's voice". The server log settled it in one look:
+twelve `persona spoke` events with real durations — 2680 ms, 3080 ms, 5192 ms — and **four
+barge-ins** in forty seconds. The audio was being generated, sent, and then flushed out of
+the browser's buffer before it could play.
+
+**The cause is the fix from 0029.** Barge-in now works during playback, as it always should
+have. On speakers, the microphone hears the persona, the energy VAD opens on it, and the
+system concludes the caller is interrupting — so it flushes everything queued, which is
+heard as the persona having no voice at all. Making barge-in correct is what exposed the
+echo, and the two are in genuine tension: perfect interruption and perfect echo immunity
+cannot both be had from one microphone with no reference signal.
+
+**A higher bar while the persona is audible.** The VAD's 3 frames above 0.015 RMS is right
+for "is the caller talking" and far too eager for "is the caller talking *over us*". Barge-in
+now needs 8 consecutive frames — 256 ms of sustained speech — above 0.06 RMS, four times the
+VAD threshold. No echo of a single word survives that; a real interruption clears it easily.
+Both numbers are config, and barge-in has an off switch on the page and over the socket.
+
+Headphones remain the actual answer, which is what the echo warning on the page says. This
+makes speakers survivable rather than good.
+
+**Also fixed, found by a test that started failing:** a turn where nothing reached the caller
+was still emitting a latency event. Reporting "reply first token 300 ms" for speech that was
+never heard puts a timing on the dashboard for an utterance that does not exist — the same
+mistake as recording the text, which 0029 fixed. Latency is now emitted only when the
+persona actually spoke.
+
+Verification after the change: zero barge-ins on the scripted call, every turn answered.
