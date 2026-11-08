@@ -23,11 +23,16 @@ from app.providers.base import (
     Role,
     UpstreamTimeout,
 )
-from app.providers.factory import PLAIN_TEXT_INSTRUCTION, build_llm_provider
+from app.providers.factory import (
+    PLAIN_TEXT_INSTRUCTION,
+    build_analysis_llm_provider,
+    build_llm_provider,
+)
 from app.providers.names import ProviderName
 from app.providers.openai_compatible import (
     FallbackLLM,
     OpenAICompatibleLLM,
+    _error_for_status,
     strip_markdown_fences,
 )
 
@@ -286,8 +291,10 @@ class ScriptedLLM:
         error: Exception | None = None,
         stall: bool = False,
         fail_after: int | None = None,
+        remaining_tokens: int | None = None,
     ) -> None:
         self.name = name
+        self.remaining_tokens = remaining_tokens
         self._pieces = ["ok "] if pieces is None else pieces
         self._error = error
         self._stall = stall
@@ -371,7 +378,122 @@ async def test_complete_json_falls_back_too() -> None:
     assert wrapper.switches == 1
 
 
+# --- staying inside the per-minute token cap -------------------------------------------
+
+
+async def test_a_rate_limited_primary_is_rested_rather_than_asked_again() -> None:
+    """The cap is per minute, so the next request inside it fails the same way.
+
+    Asking anyway costs a round trip on the one path where the caller hears the gap.
+    """
+    primary = ScriptedLLM("primary", error=RateLimited("llm HTTP 429: ITPM", retry_after=30.0))
+    fallback = ScriptedLLM("fallback", pieces=["Haan"])
+    now = [0.0]
+    wrapper = FallbackLLM(primary, fallback, clock=lambda: now[0])
+
+    assert "".join([p async for p in wrapper.stream_chat(MESSAGES)]) == "Haan"
+    assert wrapper.rate_limited == 1
+    assert primary.calls == 1
+
+    now[0] = 10.0
+    assert "".join([p async for p in wrapper.stream_chat(MESSAGES)]) == "Haan"
+    assert primary.calls == 1, "the primary was asked again inside its own retry-after"
+
+    now[0] = 31.0
+    primary._error = None
+    assert "".join([p async for p in wrapper.stream_chat(MESSAGES)]) == "ok "
+    assert primary.calls == 2
+
+
+async def test_the_primary_is_skipped_before_it_runs_out_rather_than_after() -> None:
+    """Pre-empting the 429 is the point: a refusal is latency the caller hears."""
+    primary = ScriptedLLM("primary", pieces=["Haan"], remaining_tokens=400)
+    fallback = ScriptedLLM("fallback", pieces=["beta"])
+    wrapper = FallbackLLM(primary, fallback, min_headroom=1800)
+    assert "".join([p async for p in wrapper.stream_chat(MESSAGES)]) == "beta"
+    assert primary.calls == 0
+    assert wrapper.pre_empted == 1
+
+
+async def test_a_model_that_reports_no_meter_is_still_used() -> None:
+    """`None` is "it has not said", which must never be read as "nothing left"."""
+    primary = ScriptedLLM("primary", pieces=["Haan"], remaining_tokens=None)
+    fallback = ScriptedLLM("fallback")
+    wrapper = FallbackLLM(primary, fallback)
+    assert "".join([p async for p in wrapper.stream_chat(MESSAGES)]) == "Haan"
+    assert primary.calls == 1
+    assert wrapper.pre_empted == 0
+
+
+async def test_json_requests_respect_the_same_rest() -> None:
+    primary = ScriptedLLM("primary", error=RateLimited("429", retry_after=30.0))
+    fallback = ScriptedLLM("fallback")
+    now = [0.0]
+    wrapper = FallbackLLM(primary, fallback, clock=lambda: now[0])
+    assert isinstance(await wrapper.complete_json(MESSAGES, Stage), Stage)
+    now[0] = 5.0
+    assert isinstance(await wrapper.complete_json(MESSAGES, Stage), Stage)
+    assert primary.calls == 1
+    assert fallback.calls == 2
+
+
+def test_the_meter_is_read_off_the_response_headers() -> None:
+    provider = OpenAICompatibleLLM(
+        base_url="https://example.invalid/v1",
+        api_key="k",
+        model="m",
+        client=httpx.AsyncClient(),
+    )
+    assert provider.remaining_tokens is None
+    provider._read_meter(httpx.Headers({"x-ratelimit-remaining-tokens": "1234"}))
+    assert provider.remaining_tokens == 1234
+    provider._read_meter(httpx.Headers({"x-ratelimit-remaining-tokens": "not a number"}))
+    assert provider.remaining_tokens == 1234, "a bad header must not wipe a good reading"
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ({"retry-after": "12"}, 12.0),
+        ({"x-ratelimit-reset-tokens": "7.5s"}, 7.5),
+        ({"retry-after": "Wed, 08 Nov 2026 12:00:00 GMT"}, None),
+        ({}, None),
+    ],
+)
+def test_a_429_carries_the_wait_the_server_asked_for(
+    headers: dict[str, str], expected: float | None
+) -> None:
+    error = _error_for_status(
+        429, b'{"error": {"message": "rate limited"}}', httpx.Headers(headers)
+    )
+    assert isinstance(error, RateLimited)
+    assert error.retry_after == expected
+
+
 # --- what the factory builds ----------------------------------------------------------
+
+
+def test_the_analysis_provider_is_its_own_model_with_its_own_effort() -> None:
+    """Three measured requirements in one object (DECISIONS 0034).
+
+    Its own model, because the cap is per model and sharing one starved both paths. Its own
+    reasoning effort, because `none` is an HTTP 400 on the gpt-oss family and no value at
+    all makes it return empty content. And no fallback wrapper, because a failed analysis is
+    meant to degrade to the keyword pass rather than spend the caller's budget.
+    """
+    provider = build_analysis_llm_provider(
+        ProviderName.OPENAI,
+        client=httpx.AsyncClient(),
+        base_url="https://example.invalid/v1",
+        api_key="k",
+        model="openai/gpt-oss-20b",
+        reasoning_effort="low",
+    )
+    assert isinstance(provider, OpenAICompatibleLLM)
+    assert provider.model == "openai/gpt-oss-20b"
+    assert provider._extra_body == {"reasoning_effort": "low"}  # type: ignore[attr-defined]
+
+
 
 
 def test_the_factory_configures_the_fallback_against_empty_replies_and_markdown() -> None:

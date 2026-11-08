@@ -19,7 +19,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator, Sequence
+import time
+from collections.abc import AsyncIterator, Callable, Sequence
 from typing import Any, Final
 
 import httpx
@@ -93,11 +94,32 @@ class OpenAICompatibleLLM:
         self._system_suffix = system_suffix
         self._strip_markdown = strip_markdown
         self._timeout = httpx.Timeout(request_timeout, connect=5.0)
+        self._remaining_tokens: int | None = None
 
     @property
     def model(self) -> str:
         """The model this instance calls."""
         return self._model
+
+    @property
+    def remaining_tokens(self) -> int | None:
+        """What the vendor last said was left in this model's per-minute window."""
+        return self._remaining_tokens
+
+    def _read_meter(self, headers: httpx.Headers) -> None:
+        """Record the rate-limit headers that come back with every response.
+
+        Read on failures as well as successes, and on the stream's response head, which
+        arrives before any token does. This is what lets a caller move the *next* request to
+        another model instead of finding out by being refused.
+        """
+        raw = headers.get("x-ratelimit-remaining-tokens")
+        if raw is None:
+            return
+        try:
+            self._remaining_tokens = int(float(raw))
+        except ValueError:
+            logger.debug("unparseable rate-limit header", extra={"raw": raw[:40]})
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
@@ -143,8 +165,11 @@ class OpenAICompatibleLLM:
             async with self._client.stream(
                 "POST", self._url, headers=self._headers(), json=payload, timeout=self._timeout
             ) as response:
+                self._read_meter(response.headers)
                 if response.status_code != 200:
-                    raise _error_for_status(response.status_code, await response.aread())
+                    raise _error_for_status(
+                        response.status_code, await response.aread(), response.headers
+                    )
                 async for data in _iter_data_lines(response):
                     tokens = int((data.get("usage") or {}).get("total_tokens") or tokens)
                     for choice in data.get("choices") or []:
@@ -196,8 +221,9 @@ class OpenAICompatibleLLM:
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 raise UpstreamTimeout(f"llm transport failure: {exc}") from exc
 
+            self._read_meter(response.headers)
             if response.status_code != 200:
-                raise _error_for_status(response.status_code, response.content)
+                raise _error_for_status(response.status_code, response.content, response.headers)
 
             body = response.json()
             await self._record_tokens(int((body.get("usage") or {}).get("total_tokens") or 0))
@@ -235,6 +261,17 @@ class OpenAICompatibleLLM:
         await self._usage.record(self.name, self._usage.cost.price_llm(tokens))
 
 
+#: How long to leave a rate-limited model alone when it did not say. The cap is per minute,
+#: so a minute is the honest guess; the server's own `retry-after` is preferred when present.
+RATE_LIMIT_COOLDOWN: Final[float] = 60.0
+
+#: Below this many tokens left in the window, stop sending the primary dialogue requests and
+#: let the fallback take the turn. Sized at one whole request plus a margin: a measured
+#: dialogue turn is about 1500 tokens in and 50 out, so anything under this cannot complete
+#: and would come back as a refusal the caller hears as silence (DECISIONS 0034).
+MIN_HEADROOM_TOKENS: Final[int] = 1800
+
+
 class FallbackLLM:
     """Tries a primary model, then a second one.
 
@@ -242,6 +279,12 @@ class FallbackLLM:
     notice. Falling back is only safe before the first token has been handed to the caller:
     once the persona has started speaking a sentence, switching models mid-sentence would
     produce two different replies spliced together, so a late failure propagates instead.
+
+    **A rate limit is remembered.** The per-minute token cap is per model, so once the
+    primary has returned 429 it will keep returning 429 until its window rolls over - and
+    asking it anyway costs a round trip on the one path where the caller is listening to
+    silence. So the primary is skipped until its own `retry-after` has passed, and the
+    fallback, which has a separate budget, carries the call in the meantime.
     """
 
     name = "llm-fallback"
@@ -252,11 +295,54 @@ class FallbackLLM:
         fallback: LLMProvider,
         *,
         first_token_timeout: float = 3.0,
+        min_headroom: int = MIN_HEADROOM_TOKENS,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self._primary = primary
         self._fallback = fallback
         self._first_token_timeout = first_token_timeout
+        self._min_headroom = min_headroom
+        self._clock = clock or time.monotonic
+        self._primary_rested_until = 0.0
         self.switches = 0
+        self.rate_limited = 0
+        self.pre_empted = 0
+
+    @property
+    def remaining_tokens(self) -> int | None:
+        """Whichever model the next request would go to, and what it has left."""
+        return (self._primary if self._primary_available() else self._fallback).remaining_tokens
+
+    def _primary_available(self) -> bool:
+        """Whether the next request should go to the primary at all.
+
+        Two reasons it should not, and the second is the useful one. It has recently been
+        refused, so asking again inside the same window buys a wasted round trip. Or its own
+        meter says there is not enough left for a request this size - in which case moving
+        now avoids the refusal altogether, which matters because the caller is listening to
+        the gap it would open.
+        """
+        if self._clock() < self._primary_rested_until:
+            return False
+        remaining = self._primary.remaining_tokens
+        if remaining is not None and remaining < self._min_headroom:
+            self.pre_empted += 1
+            logger.info(
+                "primary llm is nearly out of budget; using the fallback for this turn",
+                extra={"remaining": remaining, "needed": self._min_headroom},
+            )
+            return False
+        return True
+
+    def _rest_primary(self, exc: RateLimited) -> None:
+        """Stand the primary down until its token window has rolled over."""
+        wait = exc.retry_after if exc.retry_after is not None else RATE_LIMIT_COOLDOWN
+        self._primary_rested_until = self._clock() + wait
+        self.rate_limited += 1
+        logger.warning(
+            "primary llm is rate limited; resting it",
+            extra={"seconds": round(wait, 1), "fallback": self._fallback.name},
+        )
 
     async def stream_chat(
         self,
@@ -267,6 +353,13 @@ class FallbackLLM:
         max_tokens: int | None = None,
     ) -> AsyncIterator[str]:
         """Stream from the primary, switching to the fallback if it fails to get started."""
+        if not self._primary_available():
+            async for piece in self._fallback.stream_chat(
+                messages, model=None, temperature=temperature, max_tokens=max_tokens
+            ):
+                yield piece
+            return
+
         stream = self._primary.stream_chat(
             messages, model=model, temperature=temperature, max_tokens=max_tokens
         )
@@ -275,6 +368,9 @@ class FallbackLLM:
             first = await asyncio.wait_for(anext(stream), timeout=self._first_token_timeout)
         except StopAsyncIteration:
             reason = "primary produced an empty stream"
+        except RateLimited as exc:
+            self._rest_primary(exc)
+            reason = f"RateLimited: {exc}"
         except (TimeoutError, ProviderError) as exc:
             reason = f"{type(exc).__name__}: {exc}"
         else:
@@ -307,9 +403,18 @@ class FallbackLLM:
         temperature: float = 0.0,
     ) -> SchemaT:
         """Try the primary, then the fallback. Nothing has been emitted, so this is safe."""
+        if not self._primary_available():
+            return await self._fallback.complete_json(
+                messages, schema, model=None, temperature=temperature
+            )
         try:
             return await self._primary.complete_json(
                 messages, schema, model=model, temperature=temperature
+            )
+        except RateLimited as exc:
+            self._rest_primary(exc)
+            return await self._fallback.complete_json(
+                messages, schema, model=None, temperature=temperature
             )
         except ProviderError as exc:
             self.switches += 1
@@ -349,7 +454,22 @@ async def _iter_data_lines(response: httpx.Response) -> AsyncIterator[dict[str, 
             yield payload
 
 
-def _error_for_status(status: int, body: bytes) -> ProviderError:
+def _retry_after(headers: httpx.Headers | None) -> float | None:
+    """The server's own wait, in seconds, if it sent one."""
+    if headers is None:
+        return None
+    raw = headers.get("retry-after") or headers.get("x-ratelimit-reset-tokens") or ""
+    try:
+        # Groq sends plain seconds on `retry-after` and a duration like "7.5s" on the reset
+        # header. Anything else (an HTTP date) is left to the caller's own default.
+        return float(raw.rstrip("s")) if raw else None
+    except ValueError:
+        return None
+
+
+def _error_for_status(
+    status: int, body: bytes, headers: httpx.Headers | None = None
+) -> ProviderError:
     """Map an OpenAI-style error response onto our exception types."""
     message = body.decode(errors="replace")[:300]
     try:
@@ -364,7 +484,7 @@ def _error_for_status(status: int, body: bytes) -> ProviderError:
     if status == 402:
         return OutOfCredit(detail)
     if status == 429:
-        return RateLimited(detail)
+        return RateLimited(detail, retry_after=_retry_after(headers))
     if status == 504:
         return UpstreamTimeout(detail)
     if status >= 500:

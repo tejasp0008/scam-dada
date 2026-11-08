@@ -48,14 +48,15 @@ Built for the Great Indian AI Internship Challenge on Gnani's speech models.
 | **Hang-up risk** | Named signals only, including two a phrase list cannot see — replies shortening, and recency — feeding a bait-hook selector |
 | **Bait hooks** | Seven retention tactics, chosen by stage and used once each. Instructions rather than scripts, and none pleads or promises a payment |
 | **Canary identities** | One provably-unusable fictional identity per call, matched against every earlier one — including when the caller reads it aloud digit by digit |
-| **LLM analysis** | A validated-JSON second opinion that adds what regex cannot see, never blocks the dialogue path, and degrades to the keyword pass when the model is down |
+| **LLM analysis** | A validated-JSON second opinion that adds what regex cannot see, never blocks the dialogue path, and degrades to the keyword pass when the model is down. Runs on its **own** model and every third caller turn — except at the payment stage, where every turn is analysed, because the account number, the IFSC and the payee name are each said exactly once |
+| **Token budget** | Every model is capped at 8000 tokens a minute, **per model**, so the three jobs run on three models: dialogue, its fallback, and the analyst. Requests are priced by `scripts/token_budget.py` against the vendor's own `usage`, and a test holds the ceiling. A near-empty budget is read off the response headers and the next turn moves models before the refusal happens; a refusal that happens anyway rests that model for the `retry-after` it asked for, and a turn with nowhere to go stalls on filler and is asked for once more (DECISIONS 0034) |
 | **Control room** | `/dashboard` — live call list, stage ladder, pressure and risk gauges with their signals, transcript, extracted intelligence with provenance, per-turn latency |
 | **Read API** | `/api/calls`, `/api/calls/{id}`, and `/api/calls/{id}/events?after_seq=` for a dashboard that reconnected mid-call |
 | **Continuous room tone** | The line never goes digitally silent: the bed plays between utterances from the same loop position, so the fan does not restart when the persona stops. Switchable on the page and over the socket |
 | **Live demo page** | `/demo` — microphone, who-is-speaking and an echo warning on the left, the live dashboard on the right. One screen, one call, no tab switching |
 | **Replay** | `/demo?replay=<call_id>` plays a finished call back through the same panels, so the visuals can be rehearsed without talking |
 | **Evidence pack** | HTML and PDF per call: headline minutes wasted, every identifier with the machine that found it, identity leaks, latency distribution, full transcript |
-| Tests | 1176 offline + 64 contract, `ruff` and `mypy` clean (`mypy --strict` on `core` and `providers`) |
+| Tests | 1219 offline + 74 contract, `ruff` and `mypy` clean (`mypy --strict` on `core` and `providers`) |
 
 Measured on two consecutive live calls through the orchestrator (2026-11-06), per turn,
 from the caller stopping speaking:
@@ -176,7 +177,7 @@ cp .env.example .env     # then fill in GNANI_API_KEY and the LLM_* values
 make install             # venv on 3.11 + dev dependencies
 make up                  # postgres + redis
 make migrate             # apply the baseline schema
-make test                # 1176 tests, offline, zero API cost
+make test                # 1219 tests, offline, zero API cost
 make dev                 # api on http://localhost:8000
 ```
 
@@ -209,6 +210,8 @@ them the route answers 503 and says so, and the HTML pack needs neither.
 | `make audition-ladder` | 1 request, or free from cache. One voice through all six realism profiles, to choose a profile |
 | `python scripts/fake_call.py` | **Spends credits** on the first run, then free from cache. Drives a whole scripted call over the WebSocket, with no microphone |
 | `python scripts/fake_call.py --leak` | As above, but the scammer quotes a canary issued to an earlier call — the identity-leak demo |
+| `python scripts/token_budget.py` | Free. Prices the real dialogue and analysis requests against the 8000-tokens-per-minute cap and prints the turn rate each model supports |
+| `python scripts/token_budget.py --live` | **Spends a few thousand tokens** (3 requests). Adds the vendor's own completion counts and limit headers, so the figures are measured rather than estimated |
 | `python scripts/audition_voices.py --male --grandson` | **Spends credits** (6 requests). The grandson's own line in every male voice, on Dada's room and line |
 | `python scripts/audition_voices.py --voices Devansh --handoff` | Free from cache. Dada then the grandson in one clip, room tone continuous across the join — the only way to judge whether the relay reads as two people |
 | `make lint` / `make fmt` / `make types` | `ruff` and `mypy` |

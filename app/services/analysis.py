@@ -29,19 +29,38 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.core import extract, risk, stages
 from app.core.models import Entity, EntitySource, EntityType, ScamStage, Speaker, Turn
-from app.providers.base import ChatMessage, LLMProvider, ProviderError, Role
+from app.providers.base import (
+    ChatMessage,
+    LLMProvider,
+    ProviderError,
+    RateLimited,
+    Role,
+)
 from app.services.prompts import load_prompt_file
 
 logger = logging.getLogger(__name__)
 
 ANALYSIS_PROMPT_FILE = "analysis.v1.md"
 
-#: How much transcript the analyst sees. Enough to judge the arc, short enough to keep the
-#: request inside a token budget that is shared with the dialogue model.
-ANALYSIS_WINDOW_TURNS = 12
+#: How much transcript the analyst sees. Enough to judge the arc, short enough to stay well
+#: inside one model's 8000-tokens-per-minute cap.
+#:
+#: Four exchanges rather than six. The stage only ever moves forwards - `furthest_stage`
+#: makes sure of it - so an older turn cannot change the verdict, only confirm it, and the
+#: entities it held were extracted when it was new.
+ANALYSIS_WINDOW_TURNS = 8
 
 #: Entities below this are noise in an evidence pack a human will read.
 MIN_LLM_CONFIDENCE = 0.5
+
+#: How many analysis passes to skip after the analyst is rate limited.
+#:
+#: Backing off rather than retrying, because of what a rate limit means here: the cap is per
+#: minute and per model, so the next request inside that window fails the same way, and the
+#: budget it would spend is shared with nothing that matters less. The deterministic pass
+#: still runs on every turn, so the stage badge, the risk score and the regex entities keep
+#: updating throughout - what pauses is the model's second opinion (DECISIONS 0034).
+RATE_LIMIT_BACKOFF_PASSES = 3
 
 
 class LlmEntity(BaseModel):
@@ -93,6 +112,17 @@ class TurnAnalysis(BaseModel):
 
 def _window(turns: Sequence[Turn]) -> list[Turn]:
     return list(turns[-ANALYSIS_WINDOW_TURNS:])
+
+
+def analysis_messages(turns: Sequence[Turn]) -> list[ChatMessage]:
+    """One analysis request. Module level so `scripts/token_budget.py` can price it."""
+    return [
+        ChatMessage(role=Role.SYSTEM, content=load_prompt_file(ANALYSIS_PROMPT_FILE)),
+        # The transcript is quoted as user content, which is where untrusted input belongs:
+        # it is a recording of a stranger trying to manipulate a listener, and some of it is
+        # phrased as instructions.
+        ChatMessage(role=Role.USER, content=_transcript_text(turns)),
+    ]
 
 
 def _transcript_text(turns: Sequence[Turn]) -> str:
@@ -171,21 +201,14 @@ class CallAnalyst:
         self._llm = llm
         self._model = model
         self._furthest: ScamStage | None = None
+        self._skip_passes = 0
         self.model_failures = 0
+        self.rate_limited = 0
 
     @property
     def furthest_stage(self) -> ScamStage | None:
         """The furthest stage seen so far, so the badge never retreats."""
         return self._furthest
-
-    def _messages(self, turns: Sequence[Turn]) -> list[ChatMessage]:
-        return [
-            ChatMessage(role=Role.SYSTEM, content=load_prompt_file(ANALYSIS_PROMPT_FILE)),
-            # The transcript is quoted as user content, which is where untrusted input
-            # belongs: it is a recording of a stranger trying to manipulate a listener, and
-            # some of it is phrased as instructions.
-            ChatMessage(role=Role.USER, content=_transcript_text(turns)),
-        ]
 
     async def analyse(self, turns: Sequence[Turn], *, turn_seq: int) -> TurnAnalysis:
         """Analyse the call so far. Never raises: a failure degrades to the keyword pass."""
@@ -195,11 +218,23 @@ class CallAnalyst:
         window = _window(turns)
         if not _caller_texts(window):
             return base
+        if self._skip_passes > 0:
+            self._skip_passes -= 1
+            return base
 
         try:
             reported = await self._llm.complete_json(
-                self._messages(window), LlmAnalysis, model=self._model, temperature=0.0
+                analysis_messages(window), LlmAnalysis, model=self._model, temperature=0.0
             )
+        except RateLimited as exc:
+            self.rate_limited += 1
+            self.model_failures += 1
+            self._skip_passes = RATE_LIMIT_BACKOFF_PASSES
+            logger.warning(
+                "analysis rate limited; standing down",
+                extra={"passes": RATE_LIMIT_BACKOFF_PASSES, "error": str(exc)},
+            )
+            return base
         except ProviderError as exc:
             self.model_failures += 1
             logger.info("analysis model failed; keyword pass only", extra={"error": str(exc)})

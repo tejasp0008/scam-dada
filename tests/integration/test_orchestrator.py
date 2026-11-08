@@ -19,10 +19,15 @@ from app.core.models import EntitySource, EntityType, PersonaId, ScamStage, Spea
 from app.core.personas import LEAD_PERSONA, REPLY_STYLE_NOTE
 from app.core.risk import HOOK_THRESHOLD
 from app.core.state import CallState
-from app.providers.base import Role, SttConfig
+from app.providers.base import RateLimited, Role, SttConfig
 from app.providers.mock import MockLLMProvider, MockSTTProvider, MockTTSProvider
 from app.services.canary_registry import CanaryRegistry
-from app.services.orchestrator import MAX_FILLERS_PER_TURN, CallConfig, CallOrchestrator
+from app.services.orchestrator import (
+    MAX_FILLERS_PER_TURN,
+    RATE_LIMIT_RETRIES,
+    CallConfig,
+    CallOrchestrator,
+)
 from app.services.prompts import persona_fillers
 from app.services.recorder import CallRecorder
 
@@ -60,6 +65,32 @@ class SilentLLM:
         await asyncio.sleep(1.2)
         return
         yield ""  # pragma: no cover - makes this an async generator
+
+    async def complete_json(self, messages: object, schema: type, **kwargs: object) -> object:
+        return schema.model_validate({})
+
+
+class RateLimitedOnceLLM:
+    """Refuses the first dialogue request with a 429, then answers.
+
+    This is both models being out at once: by the time a `RateLimited` reaches the
+    orchestrator, `FallbackLLM` has already tried the second one.
+    """
+
+    name = "rate-limited-once-llm"
+    remaining_tokens: int | None = None
+
+    def __init__(self, reply: str, *, failures: int = 1) -> None:
+        self._reply = reply
+        self._failures = failures
+        self.chat_calls = 0
+
+    async def stream_chat(self, messages: object, **kwargs: object) -> AsyncIterator[str]:
+        self.chat_calls += 1
+        if self.chat_calls <= self._failures:
+            raise RateLimited("llm HTTP 429: TPM", retry_after=0.01)
+        for word in self._reply.split(" "):
+            yield word + " "
 
     async def complete_json(self, messages: object, schema: type, **kwargs: object) -> object:
         return schema.model_validate({})
@@ -684,6 +715,104 @@ class TestFillerCoverage:
         events = [e for e in recorder.history() if e.type is EventType.LATENCY]
         assert events
         assert any(e.filler_played for e in events)
+
+
+class TestRateLimitedTurn:
+    """What the caller hears when the account has no tokens left this minute.
+
+    Not silence. The persona goes on stalling - which is in character for a slow old man -
+    and the turn is asked for again once, because the window may have rolled over in the
+    second or two that the stall bought.
+    """
+
+    @staticmethod
+    def _recording(orchestrator: CallOrchestrator) -> list[str]:
+        spoken: list[str] = []
+        original = orchestrator._speaker.speak
+
+        async def record(request: object, **kwargs: object) -> float | None:
+            spoken.append(request.text)  # type: ignore[attr-defined]
+            return await original(request, **kwargs)  # type: ignore[arg-type]
+
+        orchestrator._speaker.speak = record  # type: ignore[method-assign]
+        return spoken
+
+    async def test_a_rate_limited_turn_stalls_and_then_answers(self) -> None:
+        orchestrator, recorder, _, _ = build()
+        spoken = self._recording(orchestrator)
+        llm = RateLimitedOnceLLM("Haan beta, ek minute. Main likh raha hoon.")
+        orchestrator._llm = llm  # type: ignore[assignment]
+        await orchestrator.run(audio(speech_frames=8, silence_frames=4, bursts=1))
+
+        assert llm.chat_calls == 2, "the turn was not asked for again"
+        assert any(text in persona_fillers(LEAD_PERSONA) for text in spoken)
+        persona = [
+            event
+            for event in recorder.history()
+            if event.type is EventType.TRANSCRIPT and event.speaker is Speaker.PERSONA
+        ]
+        assert persona, "the caller heard nothing at all"
+        assert "likh raha hoon" in persona[0].text
+
+    async def test_it_gives_up_after_one_retry_rather_than_holding_the_line(self) -> None:
+        """Two retries would hold the line past what a caller sits through."""
+        orchestrator, recorder, _, _ = build()
+        llm = RateLimitedOnceLLM("never reached", failures=99)
+        orchestrator._llm = llm  # type: ignore[assignment]
+        await orchestrator.run(audio(speech_frames=8, silence_frames=4, bursts=1))
+
+        assert llm.chat_calls == 1 + RATE_LIMIT_RETRIES
+        assert not [
+            event
+            for event in recorder.history()
+            if event.type is EventType.TRANSCRIPT and event.speaker is Speaker.PERSONA
+        ], "a turn that was never generated must not appear in the transcript"
+
+
+class TestAnalysisScheduling:
+    """How often the analyst is asked, and the one case where the interval is ignored."""
+
+    @staticmethod
+    def _orchestrator(script: tuple[str, ...]) -> tuple[CallOrchestrator, list[int]]:
+        orchestrator, _, _, _ = build(script=script, frames_per_utterance=4)
+        seen: list[int] = []
+        original = orchestrator._analysis_due
+
+        def record() -> bool:
+            due = original()
+            if due:
+                seen.append(orchestrator._caller_turns_seen)
+            return due
+
+        orchestrator._analysis_due = record  # type: ignore[method-assign]
+        return orchestrator, seen
+
+    async def test_the_first_turn_is_always_analysed(self) -> None:
+        """A dashboard that stays blank through the opening exchange looks broken."""
+        orchestrator, seen = self._orchestrator(("Hello sir, parcel ke baare mein baat hai.",))
+        await orchestrator.run(audio(speech_frames=6, silence_frames=4, bursts=1))
+        assert seen == [1]
+
+    async def test_an_ordinary_turn_can_be_skipped(self) -> None:
+        orchestrator, seen = self._orchestrator(
+            (
+                "Hello sir, parcel ke baare mein baat hai.",
+                "Aapka naam verify karna hai.",
+            )
+        )
+        await orchestrator.run(audio(speech_frames=6, silence_frames=4, bursts=2))
+        assert seen == [1], "an ordinary second turn should fall inside the interval"
+
+    async def test_a_payment_turn_is_never_skipped(self) -> None:
+        """Every identifier worth having is said once, on a turn like this one."""
+        orchestrator, seen = self._orchestrator(
+            (
+                "Hello sir, parcel ke baare mein baat hai.",
+                "Do lakh fake.officer@demo par UPI se bhej dijiye abhi.",
+            )
+        )
+        await orchestrator.run(audio(speech_frames=6, silence_frames=4, bursts=2))
+        assert seen == [1, 2]
 
 
 class TestBargeInGate:

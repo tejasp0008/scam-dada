@@ -28,6 +28,11 @@ dev = [
     "mypy>=1.13.0",
     "pre-commit>=4.0.0",
     "aiosqlite>=0.20.0",
+    # Not a runtime dependency: it is how prompt and window sizes are measured rather than
+    # guessed, by `scripts/token_budget.py` and by the test that keeps a dialogue request
+    # inside the per-minute cap. It is not the tokeniser either model actually uses, which
+    # is why both the script and the test say so (DECISIONS 0034).
+    "tiktoken>=0.8.0",
 ]
 pdf = ["weasyprint>=63.0"]
 

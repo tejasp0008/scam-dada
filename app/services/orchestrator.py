@@ -67,7 +67,7 @@ from app.providers.base import (
     ChatMessage,
     LLMProvider,
     ProviderError,
-    Role,
+    RateLimited,
     SttConfig,
     SttEvent,
     STTProvider,
@@ -78,9 +78,9 @@ from app.providers.base import (
     TTSProvider,
     TtsRequest,
 )
-from app.services.analysis import CallAnalyst, TurnAnalysis
+from app.services.analysis import CallAnalyst, TurnAnalysis, deterministic_analysis
 from app.services.canary_registry import CanaryRegistry
-from app.services.prompts import persona_fillers, persona_system_prompt
+from app.services.prompts import dialogue_messages, persona_fillers
 from app.services.recorder import CallRecorder
 from app.services.speaker import PersonaSpeaker
 from app.services.stt_rotation import RotatingSttSession
@@ -94,6 +94,17 @@ AudioSink = Callable[[bytes], Awaitable[None]]
 #: Most stall phrases queued while waiting for one reply. A man who says "ek minute" three
 #: times is still an old man; one who says it eight times is a loop.
 MAX_FILLERS_PER_TURN = 3
+
+#: How many times a rate-limited turn is asked for again. One. A second retry would hold the
+#: line past what a caller sits through, and by then the honest answer is that the account has
+#: no capacity left this minute (DECISIONS 0034).
+RATE_LIMIT_RETRIES = 1
+
+#: How long to stall before that retry, on top of letting the filler already playing finish.
+#: Capped rather than taken from the server's `retry-after`, which is a whole minute: the
+#: retry exists to ride out the second or two while a token window rolls over, not to wait
+#: one out.
+RATE_LIMIT_RETRY_WAIT = 1.5
 
 #: Queue the next filler this long before the current one runs out, so the browser's buffer
 #: never actually empties. Smaller than one filler and larger than a round trip to Timbre.
@@ -170,12 +181,15 @@ class CallConfig:
     analysis_model: str | None = None
     #: Analyse every Nth caller turn rather than all of them.
     #:
-    #: Not a cost saving so much as a capacity one. Analysis and dialogue share one account
-    #: token budget - on the free tier, 8000 tokens a minute - and a turn costs roughly 1600
-    #: input tokens of dialogue plus 1200 of analysis. Running both on every turn throttled
-    #: the *dialogue* model, which the caller hears. Stage and risk move slowly enough that
-    #: every second turn loses nothing a human would notice.
-    analysis_every_n_turns: int = 2
+    #: Not a cost saving so much as a capacity one. The cap is 8000 tokens a minute per
+    #: model, and analysis is the only request on the call that nobody is waiting for, so it
+    #: is the one that gives way. Stage and risk move slowly - the stage never moves
+    #: backwards at all - so a reading every fourth caller turn arrives before anything a
+    #: human watching the dashboard would notice had changed.
+    #:
+    #: Turn one is always analysed, and so is every turn at the payment stage: see
+    #: `_analysis_due`, which is where the exceptions and the reason for them live.
+    analysis_every_n_turns: int = 3
 
 
 @dataclass(slots=True)
@@ -205,6 +219,7 @@ class CallOrchestrator:
         stt: STTProvider,
         tts: TTSProvider,
         llm: LLMProvider,
+        analysis_llm: LLMProvider | None = None,
         recorder: CallRecorder,
         voices: dict[PersonaId, str],
         sink: AudioSink,
@@ -236,7 +251,12 @@ class CallOrchestrator:
         self._was_speaking = False
         self._loud_run = 0
         self._rotations: dict[PersonaId, FillerRotation] = {}
-        self._analyst = CallAnalyst(llm, model=config.analysis_model)
+        # A dedicated analysis provider already has its model and its reasoning effort
+        # baked in, so there is nothing left to override. Without one the analyst shares the
+        # dialogue provider and names the model per request, which is what the tests do.
+        self._analyst = CallAnalyst(
+            analysis_llm or llm, model=None if analysis_llm else config.analysis_model
+        )
         self._canary = canary or CanaryRegistry(config.call_id)
         self._analyses: set[asyncio.Task[None]] = set()
         self._latest: TurnAnalysis | None = None
@@ -566,16 +586,10 @@ class CallOrchestrator:
         Three separate failures taught the same lesson: an instruction in the system prompt is
         the furthest message from the generation, and the one closest to it is the one wins.
         """
-        messages = [ChatMessage(role=Role.SYSTEM, content=persona_system_prompt(self._persona))]
         window = recent_turns(self._turns, self._config.turn_budget)
-        for turn in window:
-            role = Role.ASSISTANT if turn.speaker is Speaker.PERSONA else Role.USER
-            messages.append(ChatMessage(role=role, content=turn.text))
-
         # Language and length last of all: form rules are the ones the model drops first.
         notes = [self._handoff_note(window), self._hook_note(), REPLY_STYLE_NOTE]
-        messages.append(ChatMessage(role=Role.SYSTEM, content="\n\n".join(n for n in notes if n)))
-        return messages
+        return dialogue_messages(self._persona, window, notes)
 
     #: Why a hook was armed, which decides how it is introduced to the model. A delay hook
     #: needs the model to know he is leaving; telling it that in front of an elicitation hook
@@ -640,41 +654,69 @@ class CallOrchestrator:
         started = self._clock()
         first_token_at: float | None = None
 
-        try:
-            async for piece in self._llm.stream_chat(self._messages()):
-                if first_token_at is None:
-                    first_token_at = self._clock()
-                    latency.llm_first_token_ms = int((first_token_at - started) * 1000)
-                buffer += piece
-                while not self._reply_full(spoken, sentences):
-                    split = take_sentence(buffer)
-                    if split is None:
+        for attempt in range(1 + RATE_LIMIT_RETRIES):
+            try:
+                async for piece in self._llm.stream_chat(self._messages()):
+                    if first_token_at is None:
+                        first_token_at = self._clock()
+                        latency.llm_first_token_ms = int((first_token_at - started) * 1000)
+                    buffer += piece
+                    while not self._reply_full(spoken, sentences):
+                        split = take_sentence(buffer)
+                        if split is None:
+                            break
+                        sentence, buffer = split
+                        if not has_speech(sentence):
+                            # Only audio tags. Billable, and it arrives as a breath with no
+                            # words attached - so it is dropped rather than counted or spoken.
+                            logger.info(
+                                "dropped a sentence with no words in it",
+                                extra={"call_id": self._config.call_id, "text": sentence[:40]},
+                            )
+                            continue
+                        ready.set()
+                        await self._await_filler(filler)
+                        if not await self._speak(sentence, latency, spoken):
+                            # Cut off, or the synthesiser refused. Either way the rest of this
+                            # reply is stale: the caller has moved on and is already talking.
+                            interrupted = True
+                            break
+                        sentences += 1
+                    if interrupted:
                         break
-                    sentence, buffer = split
-                    if not has_speech(sentence):
-                        # Only audio tags. Billable, and it arrives as a breath with no
-                        # words attached - so it is dropped rather than counted or spoken.
-                        logger.info(
-                            "dropped a sentence with no words in it",
-                            extra={"call_id": self._config.call_id, "text": sentence[:40]},
-                        )
-                        continue
-                    ready.set()
-                    await self._await_filler(filler)
-                    if not await self._speak(sentence, latency, spoken):
-                        # Cut off, or the synthesiser refused. Either way the rest of this
-                        # reply is stale: the caller has moved on and is already talking.
-                        interrupted = True
+                    if self._reply_full(spoken, sentences):
                         break
-                    sentences += 1
-                if interrupted:
+                break
+            except RateLimited as exc:
+                if spoken or attempt == RATE_LIMIT_RETRIES:
+                    logger.warning("dialogue rate limited", extra={"error": str(exc)})
                     break
-                if self._reply_full(spoken, sentences):
-                    break
-        except ProviderError as exc:
-            # The filler has already bought a couple of seconds and is the graceful
-            # degradation: the persona has stalled rather than gone silent.
-            logger.warning("dialogue generation failed", extra={"error": str(exc)})
+                # Every model on the account is capped per minute and the cap is per model,
+                # so this means the dialogue model *and* its fallback are both out. The one
+                # thing that must not happen is silence, so the persona goes on stalling -
+                # a fresh run of filler phrases, which is in character for a slow old man -
+                # and the turn is asked for again. The wait is bounded well under what a
+                # scammer tolerates: better a stall he has heard before than dead air.
+                wait = min(exc.retry_after or RATE_LIMIT_RETRY_WAIT, RATE_LIMIT_RETRY_WAIT)
+                logger.warning(
+                    "dialogue rate limited; stalling and retrying",
+                    extra={"call_id": self._config.call_id, "wait_s": round(wait, 2)},
+                )
+                buffer = ""
+                # Let the stall already in flight finish before starting another, or two
+                # filler tasks speak over each other. Waiting for it *is* most of the delay
+                # this retry needs, which is why the sleep after it is short.
+                await self._await_filler(filler)
+                filler = asyncio.create_task(self._cover_silence(latency, ready))
+                await asyncio.sleep(wait)
+                # `started` is deliberately not reset. What goes on the dashboard is how long
+                # the caller waited, and he waited through both attempts.
+                continue
+            except ProviderError as exc:
+                # The filler has already bought a couple of seconds and is the graceful
+                # degradation: the persona has stalled rather than gone silent.
+                logger.warning("dialogue generation failed", extra={"error": str(exc)})
+                break
 
         ready.set()
         await self._await_filler(filler)
@@ -836,12 +878,29 @@ class CallOrchestrator:
         if not self._config.analysis_enabled:
             return
         self._caller_turns_seen += 1
-        every = max(1, self._config.analysis_every_n_turns)
-        # Always analyse the first turn, so the dashboard is populated immediately rather
-        # than staying blank through the opening exchange.
-        if self._caller_turns_seen > 1 and self._caller_turns_seen % every != 1:
+        if not self._analysis_due():
             return
         self._track(asyncio.create_task(self._analyse(turn_seq)))
+
+    def _analysis_due(self) -> bool:
+        """Whether this caller turn is worth a model call.
+
+        An interval, with two exceptions that are both about what the pack ends up holding.
+
+        The **first turn** always counts, so the dashboard is populated before the first
+        reply rather than staying blank through the opening exchange.
+
+        So does **any turn at the payment stage**, interval or not. That is where the account
+        number, the IFSC and the payee name are said, each exactly once, and a skipped turn
+        there is an identifier that never reaches the evidence pack - the thing the call is
+        for. Measured: at a flat interval of four a scripted call came back with six entities
+        where the same call analysed on every payment turn had nine. The stage is read by the
+        deterministic pass, which is pure and local and costs nothing (DECISIONS 0034).
+        """
+        every = max(1, self._config.analysis_every_n_turns)
+        if self._caller_turns_seen == 1 or self._caller_turns_seen % every == 1:
+            return True
+        return deterministic_analysis(self._turns, turn_seq=0).stage is ScamStage.PAYMENT
 
     async def _analyse(self, turn_seq: int) -> None:
         """Analyse the call so far and emit what it found."""

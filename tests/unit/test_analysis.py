@@ -6,10 +6,11 @@ from __future__ import annotations
 import pytest
 
 from app.core.models import EntitySource, EntityType, PersonaId, ScamStage, Speaker, Turn
-from app.providers.base import BadRequest
+from app.providers.base import BadRequest, RateLimited
 from app.providers.mock import MockLLMProvider
 from app.services.analysis import (
     ANALYSIS_WINDOW_TURNS,
+    RATE_LIMIT_BACKOFF_PASSES,
     CallAnalyst,
     LlmAnalysis,
     deterministic_analysis,
@@ -89,6 +90,53 @@ class TestDegradation:
         analysis = await analyst.analyse([persona(seq=0)], turn_seq=0)
         assert analyst.model_failures == 0
         assert analysis.model_failed
+
+
+class TestRateLimitBackoff:
+    """A rate limit means the window is spent, so the next pass inside it fails the same way.
+
+    The analyst stands down instead of retrying, because its budget is shared with the
+    dialogue path and nothing on the call is waiting for it. The deterministic pass keeps
+    running throughout, which is why standing down is affordable at all.
+    """
+
+    class RateLimitedLLM:
+        name = "rate-limited-llm"
+        remaining_tokens: int | None = None
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def stream_chat(self, *args: object, **kwargs: object) -> object:
+            raise AssertionError("the analysis pass must not stream")
+
+        async def complete_json(self, *args: object, **kwargs: object) -> object:
+            self.calls += 1
+            raise RateLimited("llm HTTP 429: ITPM")
+
+    async def test_the_model_is_not_asked_again_for_several_passes(self) -> None:
+        llm = self.RateLimitedLLM()
+        analyst = CallAnalyst(llm)  # type: ignore[arg-type]
+        for seq in range(1 + RATE_LIMIT_BACKOFF_PASSES):
+            analysis = await analyst.analyse([caller(AUTHORITY, seq)], turn_seq=seq)
+            assert analysis.model_failed
+        assert llm.calls == 1
+        assert analyst.rate_limited == 1
+
+    async def test_it_tries_again_once_the_backoff_is_spent(self) -> None:
+        llm = self.RateLimitedLLM()
+        analyst = CallAnalyst(llm)  # type: ignore[arg-type]
+        for seq in range(2 + RATE_LIMIT_BACKOFF_PASSES):
+            await analyst.analyse([caller(AUTHORITY, seq)], turn_seq=seq)
+        assert llm.calls == 2
+
+    async def test_the_keyword_pass_still_reports_throughout(self) -> None:
+        """The stage badge and the regex entities must not pause with the model."""
+        analyst = CallAnalyst(self.RateLimitedLLM())  # type: ignore[arg-type]
+        for seq in range(1 + RATE_LIMIT_BACKOFF_PASSES):
+            analysis = await analyst.analyse([caller(PAYMENT, seq)], turn_seq=seq)
+            assert analysis.stage is ScamStage.PAYMENT
+            assert analysis.entities
 
 
 class TestMerging:

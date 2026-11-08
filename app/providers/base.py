@@ -44,9 +44,18 @@ class OutOfCredit(ProviderError):
 
 
 class RateLimited(ProviderError):
-    """HTTP 429. Retryable with backoff."""
+    """HTTP 429. Retryable with backoff.
+
+    Carries the server's own `retry-after` when it sent one. Every model on the account is
+    capped per minute, so the wait is a real number the vendor knows and we should not have
+    to guess (DECISIONS 0034).
+    """
 
     retryable = True
+
+    def __init__(self, message: str, *, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 class UpstreamTimeout(ProviderError):
@@ -346,6 +355,19 @@ class LLMProvider(Protocol):
     @property
     def name(self) -> str:
         """Vendor identifier used in logs and usage rows."""
+        ...
+
+    @property
+    def remaining_tokens(self) -> int | None:
+        """Tokens left in this model's current rate-limit window, if the vendor says.
+
+        `None` means it has not said - either nothing has been asked of it yet or it reports
+        no such thing - and a caller must treat that as "no information", never as "none
+        left". It is the vendor's own meter rather than a count we keep, because the window
+        is theirs: it slides, it is shared with anything else using the key, and guessing at
+        it from our own totals was what produced a call that kept asking a model that had
+        nothing left (DECISIONS 0034).
+        """
         ...
 
     def stream_chat(

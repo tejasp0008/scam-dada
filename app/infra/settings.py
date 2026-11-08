@@ -87,7 +87,16 @@ class Settings(BaseSettings):
     llm_base_url: str = ""
     llm_api_key: str = ""
     llm_model: str = ""
+    #: The analyst. Deliberately a *third* model, not the dialogue model and not its
+    #: fallback, because the per-minute token cap is per model: sharing one meant that the
+    #: moment the dialogue model throttled, every dialogue turn landed on the same bucket
+    #: analysis was already using, and both ran out (DECISIONS 0034).
     llm_analysis_model: str = ""
+    #: The gpt-oss family rejects `reasoning_effort: none` with HTTP 400 and returns empty
+    #: content without any effort set, so the analyst needs its own value rather than
+    #: inheriting the dialogue model's. Nothing on the call waits for analysis, so it can
+    #: afford to think.
+    llm_analysis_reasoning_effort: str = "low"
     # The dialogue model is a Groq preview model, which can be withdrawn or throttled
     # without notice, so a second model is always configured. Measured in DECISIONS 0010.
     llm_fallback_model: str = "openai/gpt-oss-120b"

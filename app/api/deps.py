@@ -37,6 +37,9 @@ class AppResources:
     stt: STTProvider
     tts: TTSProvider
     llm: LLMProvider
+    #: The analyst's provider. A separate object, on a separate model, so the two paths do
+    #: not share a per-minute token budget (DECISIONS 0034).
+    analysis_llm: LLMProvider
 
 
 def get_resources(request: Request) -> AppResources:

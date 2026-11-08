@@ -198,6 +198,8 @@ class MockLLMProvider:
     """Cycles canned replies, and validates queued JSON payloads for `complete_json`."""
 
     name = "mock-llm"
+    #: No vendor, so no meter. `None` is "no information", which is the honest answer.
+    remaining_tokens: int | None = None
 
     def __init__(
         self,

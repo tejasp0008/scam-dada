@@ -107,6 +107,7 @@ async def call_socket(socket: WebSocket) -> None:
         stt=resources.stt,
         tts=resources.tts,
         llm=resources.llm,
+        analysis_llm=resources.analysis_llm,
         recorder=recorder,
         voices=voices,
         sink=sink,

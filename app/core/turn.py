@@ -165,15 +165,16 @@ class TurnBudget(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    max_turns: int = Field(default=10, ge=2, description="Most recent turns kept verbatim.")
+    max_turns: int = Field(default=6, ge=2, description="Most recent turns kept verbatim.")
     max_chars: int = Field(
-        default=1800,
+        default=900,
         ge=200,
-        description="Hard ceiling on the window. Sized against the token budget rather than "
-        "against what the model could take: history is as large a per-turn cost as the "
-        "system prompt, and dialogue and analysis share one 8000-tokens-per-minute account. "
-        "Five exchanges is ample for staying in character and not repeating oneself; the "
-        "scammer's opening pitch has already been extracted by the analysis layer by then.",
+        description="Hard ceiling on the window. Sized against the per-minute token budget "
+        "rather than against what the model could hold: every model on the account is capped "
+        "at 8000 tokens a minute, the cap is per model, and the window is the only part of a "
+        "dialogue request that grows. Three exchanges is enough to stay in character and not "
+        "repeat oneself; the opening pitch has already been extracted by the analysis layer "
+        "and is in the evidence pack, not in the model's head (DECISIONS 0034).",
     )
 
 

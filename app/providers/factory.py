@@ -19,11 +19,18 @@ from app.providers.mock import MockLLMProvider, MockSTTProvider, MockTTSProvider
 from app.providers.names import ProviderName
 from app.providers.openai_compatible import FallbackLLM, OpenAICompatibleLLM
 
-#: Appended to the fallback model's system prompt. Measured need: the gpt-oss family emits
-#: markdown fences into text that is about to be spoken aloud.
+#: Appended to the fallback model's system prompt. Two measured needs, both from text that
+#: was about to be spoken aloud: this family emits markdown fences, and it answers in
+#: Devanagari however plainly the persona prompt asks for Latin script.
+#:
+#: The script rule matters more than it used to. The fallback was once a rare safety net; now
+#: that the dialogue model has a daily token cap as well as a per-minute one, the fallback
+#: carries whole calls, so it has to hold the persona's form and not just its content
+#: (DECISIONS 0034).
 PLAIN_TEXT_INSTRUCTION = (
     "Reply with plain spoken text only. Never use markdown, code fences, backticks, "
-    "asterisks, bullet points or headings."
+    "asterisks, bullet points or headings. Write Hinglish in the Latin alphabet and never "
+    "in Devanagari, whatever script the caller used. Two or three short sentences."
 )
 
 
@@ -130,3 +137,47 @@ def build_llm_provider(
         request_timeout=request_timeout,
     )
     return FallbackLLM(primary, fallback, first_token_timeout=first_token_timeout)
+
+
+def build_analysis_llm_provider(
+    name: ProviderName,
+    *,
+    client: httpx.AsyncClient | None = None,
+    base_url: str = "",
+    api_key: str = "",
+    model: str = "",
+    reasoning_effort: str = "low",
+    request_timeout: float = 30.0,
+    usage: UsageRecorder | None = None,
+) -> LLMProvider:
+    """Return the analyst's own provider: one model, no fallback.
+
+    Separate from the dialogue provider for two measured reasons (DECISIONS 0034).
+
+    **Its own model**, because the per-minute token cap is per model. When the analyst shared
+    a model with the dialogue fallback, a throttled dialogue model put every turn onto the
+    bucket the analyst was already spending, and the two starved each other.
+
+    **No fallback wrapper.** A failed analysis is already designed to degrade to the
+    deterministic keyword pass, and nothing on the call is waiting for it, so retrying it on
+    another model buys a slightly better dashboard at the cost of the budget the *caller* is
+    waiting on. Failing is the cheaper answer here.
+    """
+    if name is ProviderName.MOCK:
+        return MockLLMProvider()
+    if name is not ProviderName.OPENAI:
+        raise ProviderNotImplemented(f"no LLM adapter for {name.value}")
+    if client is None:
+        raise ValueError("the OpenAI-compatible LLM adapter needs an httpx client")
+    return OpenAICompatibleLLM(
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+        client=client,
+        usage=usage,
+        name=f"llm-analysis:{model}",
+        # Set explicitly rather than inherited: `none` is an HTTP 400 on the gpt-oss family,
+        # and no value at all makes it spend the whole budget on reasoning and return nothing.
+        extra_body={"reasoning_effort": reasoning_effort} if reasoning_effort else None,
+        request_timeout=request_timeout,
+    )

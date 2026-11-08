@@ -25,7 +25,12 @@ from app.infra.logging import configure_logging
 from app.infra.redis_bus import EventBus, create_redis
 from app.infra.settings import Settings, get_settings
 from app.infra.tts_cache import CachingTTS
-from app.providers.factory import build_llm_provider, build_stt_provider, build_tts_provider
+from app.providers.factory import (
+    build_analysis_llm_provider,
+    build_llm_provider,
+    build_stt_provider,
+    build_tts_provider,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +87,16 @@ def build_resources(settings: Settings) -> AppResources:
             fallback_reasoning_effort=settings.llm_fallback_reasoning_effort,
             reasoning_effort=settings.llm_reasoning_effort,
             first_token_timeout=settings.llm_first_token_timeout_s,
+            request_timeout=settings.llm_request_timeout_s,
+            usage=budget,
+        ),
+        analysis_llm=build_analysis_llm_provider(
+            settings.llm_provider,
+            client=http,
+            base_url=settings.llm_base_url,
+            api_key=settings.llm_api_key,
+            model=settings.analysis_model,
+            reasoning_effort=settings.llm_analysis_reasoning_effort,
             request_timeout=settings.llm_request_timeout_s,
             usage=budget,
         ),

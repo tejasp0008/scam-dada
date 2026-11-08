@@ -10,11 +10,14 @@ disk read on the dialogue path would be latency spent for nothing.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from functools import lru_cache
 from pathlib import Path
 
+from app.core.models import Speaker, Turn
 from app.core.personas import ETHICS_PROMPT_FILE, PersonaProfile
 from app.core.tags import sanitize_tags
+from app.providers.base import ChatMessage, Role
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +49,29 @@ def system_prompt(prompt_file: str) -> str:
 def persona_system_prompt(profile: PersonaProfile) -> str:
     """The system message for one persona."""
     return system_prompt(profile.prompt_file)
+
+
+def dialogue_messages(
+    profile: PersonaProfile, window: Sequence[Turn], notes: Sequence[str | None]
+) -> list[ChatMessage]:
+    """One dialogue request: the persona, the conversation window, then this turn's notes.
+
+    Lives here rather than in the orchestrator so that the shape of the request - which is
+    what the per-minute token budget is spent on - can be measured and tested without a
+    call, a socket or a provider. `scripts/token_budget.py` counts exactly this.
+
+    The notes are joined into a single trailing system message. Anything that must hold for
+    *this* reply goes there, because the message nearest the generation is the one that wins
+    (DECISIONS 0031, 0032).
+    """
+    messages = [ChatMessage(role=Role.SYSTEM, content=persona_system_prompt(profile))]
+    for turn in window:
+        role = Role.ASSISTANT if turn.speaker is Speaker.PERSONA else Role.USER
+        messages.append(ChatMessage(role=role, content=turn.text))
+    joined = "\n\n".join(note for note in notes if note)
+    if joined:
+        messages.append(ChatMessage(role=Role.SYSTEM, content=joined))
+    return messages
 
 
 @lru_cache(maxsize=8)

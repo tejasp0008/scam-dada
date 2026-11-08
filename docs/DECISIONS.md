@@ -1297,3 +1297,130 @@ grandfather's-notes-do-not-match tactic, which is the behaviour the prompt alrea
 
 The scripted values stay unusable by construction: the account begins `0000`, which no Indian
 bank issues, and the IFSC bank code is `FAKE`, exactly as the canary builds them.
+
+---
+
+## 0034 — The token budget: per model, per minute, and per day
+*2026-11-08 · capacity*
+
+A live call ran out of tokens on both models at once: about 12.6K on `openai/gpt-oss-120b`
+and 11.2K on `qwen/qwen3.8-27b` inside a minute. Reproduced and measured rather than
+reasoned about, with `scripts/token_budget.py`, which rebuilds the real requests and prices
+them; `--live` sends one of each and prints the vendor's own `usage` block.
+
+**The limits, read off `x-ratelimit-limit-tokens` rather than assumed.** Every model on the
+account is capped at **8000 tokens a minute**, and the cap is **per model**. There are four
+chat models available and three are usable: `qwen/qwen3.8-27b`, `openai/gpt-oss-120b` and
+`openai/gpt-oss-20b`. That is three separate buckets, which is the single most useful fact
+here — and the old configuration spent two of them as if they were one.
+
+**There is also a daily cap, and it is invisible.** The first 429 of the day said
+`tokens per day (TPD): Limit 200000, Used 199229`. Nothing in the response headers reports
+it: `x-ratelimit-remaining-tokens` is the per-minute meter only. So a daily limit cannot be
+pre-empted, only recovered from, which is why the recovery path below exists as well as the
+avoidance one. 200000 a day is about 130 dialogue turns, or a dozen full calls, which is a
+real constraint on a day of rehearsing.
+
+### What was actually expensive
+
+Four separate things, and the one everybody guesses — the history window — was the smallest.
+
+1. **The analyst and the dialogue fallback were the same model.** This is the whole failure.
+   The moment the dialogue model throttled, `FallbackLLM` put *every* dialogue turn onto the
+   bucket the analyst was already spending, so one model's exhaustion became two.
+2. **Every analysis request was paid for twice.** The analysis prompt described its fields in
+   prose and never showed the JSON shape, so both model families returned something that
+   failed validation on the first attempt — `type` instead of `entity_type` on one, an object
+   keyed by entity type instead of a list on the other. `complete_json` then re-asked with
+   the full JSON schema attached. Measured: 1514 tokens for the invalid attempt plus 1801 for
+   the re-ask, **3315 tokens for one reading**. Showing the literal object in the prompt costs
+   about 80 tokens and both models now validate first time, at **1281**. A 61% cut from
+   writing the schema down, which is more than any amount of trimming would have found.
+3. **The analyst was sent the dialogue model's `reasoning_effort`.** It shared the dialogue
+   provider and named its model per request, so it inherited `reasoning_effort: "none"` —
+   which the gpt-oss family rejects with **HTTP 400**. Every analysis pass therefore failed
+   outright and only ever succeeded through the fallback. A wasted round trip on every pass,
+   and an analysis layer quietly running one model behind the one it was configured for.
+4. **The dialogue request had grown to 1763 input tokens**, which is four and a half turns a
+   minute. The persona prompts carried explanatory prose that the model does not need, and
+   the window held ten turns and 1800 characters.
+
+### What changed
+
+**Three models, three jobs.** `build_analysis_llm_provider` gives the analyst its own
+provider on `openai/gpt-oss-20b`, with its own reasoning effort and **no fallback wrapper**.
+No wrapper because a failed analysis is already designed to degrade to the deterministic
+keyword pass and nothing on the call waits for it, so retrying it on another model buys a
+slightly better dashboard with budget the caller is waiting on. The weaker model costs a
+little: it read the stage as `hook` where the 120B read `payment`. That is harmless by
+construction — `furthest_stage` takes the further of the model's reading and the keyword
+pass, so an under-read can only fail to add — and the entities, which are what the pack is
+for, came back identical.
+
+**Smaller requests.** The persona prompts lost their prose and kept every rule: Dada 1062 →
+882 tokens, the grandson 694 → 672. `ethics.v1.md` was deliberately **not** touched: its
+digest is pinned by a test that backs the README's claim that the constraints are present and
+unmodified, and 302 tokens is a fair price for that. The window went from 10 turns / 1800
+characters to 6 / 900. Dialogue input: **1763 → 1474**.
+
+**Analysis less often, except where it counts.** Every third caller turn rather than every
+second, with two exceptions in `_analysis_due`: the first turn always, so the dashboard is
+not blank through the opening exchange, and **every turn at the payment stage**, interval or
+not. The second exception was added after measuring the cost of not having it: at a flat
+interval of four, the scripted call came back with six entities where the same call had
+produced nine. The account number, the IFSC and the payee name are each said exactly once,
+on consecutive turns, and a skipped turn there is an identifier that never reaches the
+evidence pack. The stage is read by the deterministic pass, which is pure, local and free.
+
+**The rate limit is avoided, and then survived.** Three layers, cheapest first:
+
+* `OpenAICompatibleLLM` records `x-ratelimit-remaining-tokens` from every response, including
+  the stream's response head, which arrives before any token does. `FallbackLLM` skips the
+  primary when its own meter says there is less left than one request needs. The 429 never
+  happens, so the caller never hears the gap it would open. `None` means "it has not said"
+  and is never read as "nothing left".
+* When one does happen anyway — a daily cap, or another process sharing the key — the primary
+  is **rested** for the `retry-after` the server sent, rather than asked again every turn
+  inside a window it will keep refusing.
+* If both models are out, the turn **stalls and is asked for again**, once. A fresh run of
+  filler phrases covers the wait, which is in character for a slow old man, and 2.5 seconds
+  is bounded well under what a caller sits through. One retry, not two: past that the honest
+  answer is that there is no capacity this minute. The analyst does the opposite and stands
+  down for three passes, because its budget is shared with a path that matters more.
+
+### Measured, before and after
+
+Per request, from the vendor's own `usage`:
+
+| | before | after |
+|---|---|---|
+| dialogue, one turn | 1773 | 1498 |
+| analysis, one pass | 3315 across 2 billed requests | 1281 in one |
+| dialogue on the fallback | — | 1557 |
+
+Per minute, at five caller turns — which is what a fast call actually runs at, because the
+persona speaks for six or seven seconds and the caller for four:
+
+| | before | after |
+|---|---|---|
+| `qwen/qwen3.8-27b` | 8865 (111%) | 6200 (78%) |
+| `openai/gpt-oss-120b` | 8288 (104%) *before any dialogue spilled onto it* | 1341 (17%) |
+| `openai/gpt-oss-20b` | unused | 1600 (20%) |
+
+Before, both models were over the cap at five turns a minute and the spill made it worse.
+After, the script reports clean up to nine turns a minute, which no real call reaches.
+
+### The thing that nearly got missed
+
+Trimming the persona prompt reintroduced DECISIONS 0032. Dada's Speech section had said
+"**Two or three short sentences**, and **never fewer than eight words**"; compressing it kept
+only the floor. The next scripted call came back with a median reply of 151 characters
+against the calibrated 97, 114 seconds of speech against 57, and a final turn in Devanagari
+that broke character. Restoring the upper bound costs about ten tokens.
+
+Two lessons, both already in 0032 and both relearned: a length rule needs its ceiling stated
+in the prompt as well as in the turn note, and **a token budget is not a reason to delete a
+rule** — only a reason to say it in fewer words.
+
+The fallback's system suffix now also names the script, because a fallback that carries whole
+calls has to hold the persona's form and not just its content.
