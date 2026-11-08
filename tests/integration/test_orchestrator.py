@@ -16,7 +16,7 @@ from app.core.audio.framing import float32_to_pcm
 from app.core.canary import issue
 from app.core.events import EventType
 from app.core.models import EntitySource, EntityType, PersonaId, ScamStage, Speaker
-from app.core.personas import LEAD_PERSONA
+from app.core.personas import LANGUAGE_NOTE, LEAD_PERSONA
 from app.core.state import CallState
 from app.providers.base import Role, SttConfig
 from app.providers.mock import MockLLMProvider, MockSTTProvider, MockTTSProvider
@@ -416,11 +416,13 @@ class TestDegradation:
 class TestHandoffContext:
     """The relay shares one history, which is why the new persona needs telling whose it is."""
 
-    async def test_no_note_is_added_before_a_handoff(self) -> None:
+    async def test_no_handoff_note_is_added_before_a_handoff(self) -> None:
+        """The turn note is always sent - for the language rule - but says nothing of a relay."""
         orchestrator, _, _, llm = build()
         await orchestrator.run(audio(speech_frames=8, silence_frames=4, bursts=1))
         for messages in llm.chat_calls:
-            assert sum(m.role is Role.SYSTEM for m in messages) == 1
+            assert sum(m.role is Role.SYSTEM for m in messages) == 2
+            assert "handed to you" not in messages[-1].content
 
     async def test_after_a_handoff_the_grandson_is_told_whose_lines_those_were(self) -> None:
         """On a real call he answered with his grandfather's line about his glasses."""
@@ -445,6 +447,8 @@ class TestHandoffContext:
         with_note = [m for m in llm.chat_calls if any(x.role is Role.SYSTEM for x in m[1:])]
         assert with_note
         assert with_note[-1][-1].role is Role.SYSTEM
+        # The language reminder is the final line of that note, after the handoff text.
+        assert with_note[-1][-1].content.endswith(LANGUAGE_NOTE)
 
 
 class TestIntelligence:

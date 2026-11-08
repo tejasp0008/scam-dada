@@ -1118,3 +1118,45 @@ mistake as recording the text, which 0029 fixed. Latency is now emitted only whe
 persona actually spoke.
 
 Verification after the change: zero barge-ins on the scripted call, every turn answered.
+
+## 0031 — The persona mirrored the caller's language
+*2026-11-08 · demo hardening*
+
+Reported as "the agent is answering in English, not Hindi". A two-case probe against the
+real model settled it: the same prompt, the same persona, the caller's language the only
+difference.
+
+```
+CALLER: Hello sir, this is Inspector Sharma from Delhi cyber crime branch.
+DADA:   Hello? Hello? Wait, who is speaking? ... My grandson is sleeping, please speak clearly.
+
+CALLER: Hello sir, main Delhi cyber crime branch se inspector Sharma bol raha hoon.
+DADA:   Kya? Sharma? Main samajh nahi paaya, aap Delhi se ho?
+```
+
+Nothing was misconfigured. **Language mirroring is driven by the most recent message in the
+request**, and the Hinglish rule sat at line 49 of the persona prompt under `## Speech` — the
+furthest message in the request from the generation. On the scripted call the scammer speaks
+Hinglish, so the mirroring agreed with the instruction and the bug was invisible for a week;
+it only appeared on the live mic, where the caller is whoever picked up.
+
+**Three changes, each verified against the live model:**
+
+1. **The rule moves to the top of each persona prompt**, as its own `## Language` section
+   stating that the caller's language never changes the persona's.
+2. **A 38-token system note in last position on every dialogue turn.** This is the same
+   remedy the handoff note needed in 0019, for the same reason, so the two now share one
+   message: anything that must hold for *this* reply — whose words the history holds, an
+   armed bait hook, the language to answer in — is joined into a single trailing system note,
+   with the language line last of all because it is the instruction the model drops first.
+3. **The grandson needed a reason, not an instruction.** With the rule at the top and the
+   note appended he still answered in fluent English four turns out of four: a 27-year-old
+   who works at a bank plausibly speaks English, and the model preferred that inference to
+   the rule. Dada complies because his block gives a character reason — his English was never
+   good. The grandson's now gives one too: he is standing in his own house with his
+   grandfather beside him, who has to follow what is being said. That, plus four example
+   lines in his register, holds.
+
+**Cost.** Dada's system prompt goes 1287 → 1365 tokens and the grandson's 877 → 997, plus 38
+per turn for the note. Against Groq's 7000 ITPM that is roughly 800 extra input tokens over a
+ten-turn call — real, and the reason it is written down rather than absorbed quietly.

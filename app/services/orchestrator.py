@@ -42,6 +42,7 @@ from app.core.events import (
 )
 from app.core.models import Entity, PersonaId, Speaker, Turn
 from app.core.personas import (
+    LANGUAGE_NOTE,
     LEAD_PERSONA,
     PersonaProfile,
     hand_back,
@@ -541,7 +542,7 @@ class CallOrchestrator:
     # ---- speaking --------------------------------------------------------------------
 
     def _messages(self) -> list[ChatMessage]:
-        """The dialogue request: constraints, persona, conversation, then who is speaking.
+        """The dialogue request: constraints, persona, conversation, then a note for this turn.
 
         The relay shares one history, which is the point - the grandson has to know what his
         grandfather was told. But the previous persona's replies sit in that history as
@@ -549,8 +550,10 @@ class CallOrchestrator:
         continues them: on a real call the grandson's first line was Dada's line about
         looking for his glasses.
 
-        So a handoff appends a note naming whose words those were. It goes last because the
-        instruction that has to win is the one closest to the generation.
+        So anything that must hold for *this* reply - whose words those were, a bait hook, the
+        language to answer in - goes into one system note after the conversation. Two separate
+        failures taught the same lesson: an instruction in the system prompt is the furthest
+        message from the generation, and the one closest to it is the one that wins.
         """
         messages = [ChatMessage(role=Role.SYSTEM, content=persona_system_prompt(self._persona))]
         window = recent_turns(self._turns, self._config.turn_budget)
@@ -558,19 +561,20 @@ class CallOrchestrator:
             role = Role.ASSISTANT if turn.speaker is Speaker.PERSONA else Role.USER
             messages.append(ChatMessage(role=role, content=turn.text))
 
-        if (note := self._handoff_note(window)) is not None:
-            messages.append(ChatMessage(role=Role.SYSTEM, content=note))
-        if (hook := self._take_hook()) is not None:
-            messages.append(
-                ChatMessage(
-                    role=Role.SYSTEM,
-                    content=(
-                        "The caller is close to ending the call. Work the following into "
-                        f"this reply, in character and without hurrying: {hook.instruction}"
-                    ),
-                )
-            )
+        # Language last of all: it is the instruction the model drops first.
+        notes = [self._handoff_note(window), self._hook_note(), LANGUAGE_NOTE]
+        messages.append(ChatMessage(role=Role.SYSTEM, content="\n\n".join(n for n in notes if n)))
         return messages
+
+    def _hook_note(self) -> str | None:
+        """The armed bait hook as an instruction for this reply, if one is armed."""
+        hook = self._take_hook()
+        if hook is None:
+            return None
+        return (
+            "The caller is close to ending the call. Work the following into this reply, "
+            f"in character and without hurrying: {hook.instruction}"
+        )
 
     def _take_hook(self) -> BaitHook | None:
         """Consume the armed hook, if there is one. Each hook is used at most once."""

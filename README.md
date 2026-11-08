@@ -35,6 +35,7 @@ Built for the Great Indian AI Internship Challenge on Gnani's speech models.
 | **Persona voices** | Both personas are Devansh on `bad-line` — relatives share timbre — pushed apart in processing to +2.26 semitones and 20% in rate. Startup fails only if two personas would render *identically* |
 | **Audio tags** | The 13-tag Timbre v3.0 catalogue, with a per-persona allowed set; unknown tags are billed and then discarded by the API, so they are stripped first |
 | **Personas** | Dada and grandson prompts, ethics block shared and digest-pinned, relay registry |
+| **Language hold** | The caller's language does not become the persona's. A live English-speaking scammer got fluent English replies until the Hinglish rule moved to the top of each prompt and into a 38-token note in last position on every turn — mirroring follows the *most recent* message, not the system prompt (DECISIONS 0031) |
 | **Orchestrator** | One object per call: rotating STT, local VAD, barge-in, fillers, sentence-by-sentence replies, per-turn latency |
 | **Turn-taking** | Replies cut at the first sentence boundary so synthesis starts before generation finishes; handles decimals, audio tags and unpunctuated run-ons |
 | **STT rotation** | Prisma's 15-minute cap becomes a seam, not a hang-up — rotated before the cap, deferred mid-utterance, and reactive if the session dies at it |

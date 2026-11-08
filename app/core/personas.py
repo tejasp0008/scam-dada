@@ -54,6 +54,19 @@ class PersonaProfile(BaseModel):
             raise ValueError(f"{self.persona_id}: not Timbre v3.0 tags: {sorted(unknown)}")
 
 
+#: Sent as a system note in last position on every dialogue turn.
+#:
+#: The persona prompts name Hinglish in their first paragraph and the model still answered a
+#: pure-English caller in pure English, every turn, in both personas. Language mirroring is
+#: driven by the most recent message in the request, and the system prompt is the furthest
+#: thing from it. The remedy is the same one the handoff note needed: the instruction closest
+#: to the generation is the one that wins (DECISIONS 0031).
+LANGUAGE_NOTE = (
+    "Reply in Hinglish written in the English alphabet, whatever language the caller just "
+    "used. If he spoke only English, you still answer in Hinglish. Never Devanagari."
+)
+
+
 #: Handoff order. The scammer meets these in sequence, and each handoff resets his patience
 #: without resetting the shared call history.
 RELAY: tuple[PersonaProfile, ...] = (
