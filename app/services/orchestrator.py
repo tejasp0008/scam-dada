@@ -42,8 +42,8 @@ from app.core.events import (
 )
 from app.core.models import Entity, PersonaId, Speaker, Turn
 from app.core.personas import (
-    LANGUAGE_NOTE,
     LEAD_PERSONA,
+    REPLY_STYLE_NOTE,
     PersonaProfile,
     hand_back,
     next_in_relay,
@@ -51,7 +51,7 @@ from app.core.personas import (
 )
 from app.core.risk import BaitHook, choose_hook
 from app.core.state import CallState, transition
-from app.core.tags import sanitize_tags, tidy_for_speech
+from app.core.tags import has_speech, sanitize_tags, tidy_for_speech
 from app.core.turn import (
     FillerRotation,
     TurnBudget,
@@ -140,7 +140,16 @@ class CallConfig:
     #: How many turns the grandson keeps the phone before handing it back unprompted.
     grandson_turns_before_handback: int = 2
     turn_budget: TurnBudget = field(default_factory=TurnBudget)
+    #: How long one turn may run. What the caller experiences as latency is not the pipeline
+    #: - first token is ~276 ms - but how long he waits before he can speak again.
+    #:
+    #: The sentence count stays at three: cutting to two produced forty-character stubs, and
+    #: the prompt is right that a two-word reply reads as a broken machine rather than a slow
+    #: man. Brevity is asked for in the turn note instead, where it can shorten a sentence
+    #: rather than remove one. The character bound is a safety valve for a runaway reply, set
+    #: well above the ~110 characters a normal turn produces (DECISIONS 0032).
     max_reply_sentences: int = 3
+    max_reply_chars: int = 220
     source: str = "browser"
     #: Stream room tone between utterances so the line is never digitally silent. The
     #: operator can switch it off mid-call; see `set_room_tone`.
@@ -551,9 +560,9 @@ class CallOrchestrator:
         looking for his glasses.
 
         So anything that must hold for *this* reply - whose words those were, a bait hook, the
-        language to answer in - goes into one system note after the conversation. Two separate
-        failures taught the same lesson: an instruction in the system prompt is the furthest
-        message from the generation, and the one closest to it is the one that wins.
+        language and length to answer in - goes into one system note after the conversation.
+        Three separate failures taught the same lesson: an instruction in the system prompt is
+        the furthest message from the generation, and the one closest to it is the one wins.
         """
         messages = [ChatMessage(role=Role.SYSTEM, content=persona_system_prompt(self._persona))]
         window = recent_turns(self._turns, self._config.turn_budget)
@@ -561,8 +570,8 @@ class CallOrchestrator:
             role = Role.ASSISTANT if turn.speaker is Speaker.PERSONA else Role.USER
             messages.append(ChatMessage(role=role, content=turn.text))
 
-        # Language last of all: it is the instruction the model drops first.
-        notes = [self._handoff_note(window), self._hook_note(), LANGUAGE_NOTE]
+        # Language and length last of all: form rules are the ones the model drops first.
+        notes = [self._handoff_note(window), self._hook_note(), REPLY_STYLE_NOTE]
         messages.append(ChatMessage(role=Role.SYSTEM, content="\n\n".join(n for n in notes if n)))
         return messages
 
@@ -622,11 +631,19 @@ class CallOrchestrator:
                     first_token_at = self._clock()
                     latency.llm_first_token_ms = int((first_token_at - started) * 1000)
                 buffer += piece
-                while sentences < self._config.max_reply_sentences:
+                while not self._reply_full(spoken, sentences):
                     split = take_sentence(buffer)
                     if split is None:
                         break
                     sentence, buffer = split
+                    if not has_speech(sentence):
+                        # Only audio tags. Billable, and it arrives as a breath with no
+                        # words attached - so it is dropped rather than counted or spoken.
+                        logger.info(
+                            "dropped a sentence with no words in it",
+                            extra={"call_id": self._config.call_id, "text": sentence[:40]},
+                        )
+                        continue
                     ready.set()
                     await self._await_filler(filler)
                     if not await self._speak(sentence, latency, spoken):
@@ -637,7 +654,7 @@ class CallOrchestrator:
                     sentences += 1
                 if interrupted:
                     break
-                if sentences >= self._config.max_reply_sentences:
+                if self._reply_full(spoken, sentences):
                     break
         except ProviderError as exc:
             # The filler has already bought a couple of seconds and is the graceful
@@ -648,8 +665,9 @@ class CallOrchestrator:
         await self._await_filler(filler)
         if (
             not interrupted
-            and sentences < self._config.max_reply_sentences
+            and not self._reply_full(spoken, sentences)
             and (tail := flush_tail(buffer))
+            and has_speech(tail)
         ):
             await self._speak(tail, latency, spoken)
 
@@ -665,6 +683,19 @@ class CallOrchestrator:
                 "turn produced no audible reply",
                 extra={"call_id": self._config.call_id, "interrupted": interrupted},
             )
+
+    def _reply_full(self, spoken: Sequence[str], sentences: int) -> bool:
+        """Has this turn said enough to stop reading the stream?
+
+        The sentence count is what the persona prompt asks for. The character count is what
+        actually bounds how long he talks: one long sentence passes the first test and still
+        holds the line for eight seconds. Whatever is left of the stream is dropped unspoken
+        and unrecorded, the same way an interrupted sentence is, so the transcript continues
+        to hold only what the caller heard.
+        """
+        if sentences >= self._config.max_reply_sentences:
+            return True
+        return sum(len(text) for text in spoken) >= self._config.max_reply_chars
 
     async def _cover_silence(self, latency: TurnLatency, ready: asyncio.Event) -> None:
         """Keep stall phrases going until the first real sentence exists.

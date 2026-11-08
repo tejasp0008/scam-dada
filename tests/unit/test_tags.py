@@ -9,6 +9,7 @@ from app.core.tags import (
     GRANDSON_TAGS,
     TIMBRE_V3_TAGS,
     billable_characters,
+    has_speech,
     sanitize_tags,
     tidy_for_speech,
 )
@@ -143,3 +144,17 @@ class TestTidyForSpeech:
     def test_it_reduces_the_billable_count(self) -> None:
         raw = "<pauses> Haan haan.\n\nSabse pehle naam bataiye."
         assert billable_characters(tidy_for_speech(raw)) < billable_characters(raw)
+
+
+class TestHasSpeech:
+    """A reply that is only audio tags is billed and lands as a breath with no words."""
+
+    def test_a_tag_only_reply_has_no_speech(self) -> None:
+        assert not has_speech("<pauses>")
+        assert not has_speech("<sigh> <clears throat>")
+
+    def test_whitespace_alone_has_no_speech(self) -> None:
+        assert not has_speech("   ")
+
+    def test_a_tag_with_words_has_speech(self) -> None:
+        assert has_speech("<pauses> Haan beta, ek minute.")

@@ -16,7 +16,7 @@ from app.core.audio.framing import float32_to_pcm
 from app.core.canary import issue
 from app.core.events import EventType
 from app.core.models import EntitySource, EntityType, PersonaId, ScamStage, Speaker
-from app.core.personas import LANGUAGE_NOTE, LEAD_PERSONA
+from app.core.personas import LEAD_PERSONA, REPLY_STYLE_NOTE
 from app.core.state import CallState
 from app.providers.base import Role, SttConfig
 from app.providers.mock import MockLLMProvider, MockSTTProvider, MockTTSProvider
@@ -447,8 +447,8 @@ class TestHandoffContext:
         with_note = [m for m in llm.chat_calls if any(x.role is Role.SYSTEM for x in m[1:])]
         assert with_note
         assert with_note[-1][-1].role is Role.SYSTEM
-        # The language reminder is the final line of that note, after the handoff text.
-        assert with_note[-1][-1].content.endswith(LANGUAGE_NOTE)
+        # The style reminder is the final line of that note, after the handoff text.
+        assert with_note[-1][-1].content.endswith(REPLY_STYLE_NOTE)
 
 
 class TestIntelligence:

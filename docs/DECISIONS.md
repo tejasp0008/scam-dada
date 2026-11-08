@@ -1160,3 +1160,68 @@ it only appeared on the live mic, where the caller is whoever picked up.
 **Cost.** Dada's system prompt goes 1287 → 1365 tokens and the grandson's 877 → 997, plus 38
 per turn for the note. Against Groq's 7000 ITPM that is roughly 800 extra input tokens over a
 ten-turn call — real, and the reason it is written down rather than absorbed quietly.
+
+## 0032 — "Latency has increased a lot" was reply length, not latency
+*2026-11-08 · demo hardening*
+
+Reported straight after 0031. The first thing worth recording is that **the running server
+had never loaded 0031**: started 00:05:20, no `--reload`, prompts behind an `lru_cache`. So
+whatever was being felt, that commit had not caused it. Measured anyway, three runs each
+against the live model:
+
+| | input tokens | first token |
+|---|---|---|
+| old prompt, no note | 1406 | 260 ms |
+| new prompt + note | 1522 | 274 ms |
+| fallback model | 1522 | 503 ms |
+
+**14 ms.** Pipeline latency across the recorded calls is unchanged too — STT ~520 ms, LLM
+first token ~270 ms, TTS first byte ~700 ms, before and after.
+
+**What actually changed was how long the persona talks.** Reply length went from a 94-character
+median to 134, and the scripted call from 78 s to 86 s with 76.9 s of persona speech across
+20 utterances — about 12.8 s per turn. First token at 270 ms is irrelevant if the caller then
+waits twelve seconds for a turn, and on a live microphone that *is* the latency he feels. The
+bigger `## Language` section had pushed the brevity rule in `## Speech` far enough from the
+generation to be dropped — the same failure as 0031, caused by the fix for 0031.
+
+**Two corrections, and the first one was wrong.** Cutting `max_reply_sentences` to 2 and
+bounding characters at 130 produced 40-character stubs — the persona prompt is right that a
+two-word reply reads as a broken machine rather than a slow man. Worse, the next run with the
+cap restored was *shorter still*, a 33-character median:
+
+> **Mechanical truncation feeds back through the transcript.** Only what was spoken is
+> recorded (0029), which is correct for the evidence pack — but the dialogue history is the
+> same list, so a truncated reply becomes an example the model then imitates. One clipped
+> turn collapses the rest of the call. A ceiling alone does the same thing on its own, because
+> the model trends to the floor of whatever range it is given.
+
+So length is asked for as a **range** — "fifteen to twenty-five words, fewer sounds like a
+dropped line, more and he never gets a turn" — in the turn note where form rules survive, and
+`max_reply_sentences` stays at 3 with the character bound raised to 220 as a safety valve for
+a runaway reply rather than a routine cut.
+
+**Also fixed:** one turn's entire reply was `<pauses>`. A tag-only utterance is billed in
+full, arrives as a breath with no words around it, and reads on the transcript as a reply the
+caller never heard. `has_speech()` now drops those before synthesis, in the loop rather than
+in `_speak`, because `_speak` returning false means "cut off" and would abandon the rest of
+the turn.
+
+**Measured, same six-line script each time:**
+
+| run | median reply | min | max | call |
+|---|---|---|---|---|
+| baseline, before 0031 | 94 ch | 39 | 110 | 78 s |
+| after 0031 | 134 ch | 98 | 164 | 86 s |
+| 2-sentence cap | 40 ch | 8 | 55 | 59 s |
+| 3 sentences, ceiling only | 33 ch | 20 | 92 | 66 s |
+| **3 sentences, range note** | **97 ch** | **49** | **123** | **81 s** |
+
+Back to the baseline length with tighter variance, zero barge-ins, the UPI handle and the
+`payment` stage still captured. The turn note costs 64 tokens.
+
+**One number worth knowing before the recording:** the dialogue model's limit is 7000 input
+tokens per minute and a turn costs ~1520, so the primary sustains about **four and a half
+dialogue turns per minute**. Past that it returns 429 and every turn goes to the fallback,
+which is 503 ms to first token instead of 274 ms. That ceiling is unrelated to these
+commits — it is the reason the fallback exists.

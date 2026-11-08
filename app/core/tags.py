@@ -111,6 +111,16 @@ def tidy_for_speech(text: str) -> str:
     return cleaned.strip()
 
 
+def has_speech(text: str) -> bool:
+    """Is there anything here a listener would hear as a word?
+
+    A reply that is only audio tags is billed in full and lands as a breath or a silence
+    with no words around it. One scripted call ended with the persona's whole turn being
+    `<pauses>`, which reads on the transcript as a reply and sounds like a dropped line.
+    """
+    return bool(re.sub(r"<[^<>]{1,24}>", " ", text).strip())
+
+
 def billable_characters(text: str) -> int:
     """What Timbre will charge for this text, tags and angle brackets included.
 
