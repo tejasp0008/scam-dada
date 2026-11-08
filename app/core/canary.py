@@ -51,6 +51,7 @@ from collections.abc import Sequence
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.models import CanaryIdentity
+from app.core.spoken import REPEATERS, SPOKEN_DIGITS
 
 #: Given names for the fictional victim. Common enough to be plausible to a scammer reading
 #: a lead list, and always paired with an invented surname.
@@ -172,37 +173,6 @@ def is_visibly_fake(identity: CanaryIdentity) -> bool:
     )
 
 
-#: Digits as a person reads them out, English and Hinglish, including the "oh" that stands
-#: in for zero and the "o" a transcriber sometimes produces for it.
-_SPOKEN_DIGITS: dict[str, str] = {
-    "zero": "0",
-    "oh": "0",
-    "shunya": "0",
-    "one": "1",
-    "ek": "1",
-    "two": "2",
-    "do": "2",
-    "three": "3",
-    "teen": "3",
-    "four": "4",
-    "char": "4",
-    "chaar": "4",
-    "five": "5",
-    "panch": "5",
-    "paanch": "5",
-    "six": "6",
-    "chhe": "6",
-    "seven": "7",
-    "saat": "7",
-    "eight": "8",
-    "aath": "8",
-    "nine": "9",
-    "nau": "9",
-}
-
-#: Said before a digit to repeat it.
-_REPEATERS: dict[str, int] = {"double": 2, "triple": 3, "thrice": 3}
-
 _SYMBOL_WORDS: tuple[tuple[str, str], ...] = (
     (r"\bat\s+the\s+rate\s+(?:of\s+)?", "@"),
     (r"\bat\b", "@"),
@@ -226,10 +196,10 @@ def despoken(text: str) -> str:
     out: list[str] = []
     repeat = 1
     for word in words:
-        if word in _REPEATERS:
-            repeat = _REPEATERS[word]
+        if word in REPEATERS:
+            repeat = REPEATERS[word]
             continue
-        digit = _SPOKEN_DIGITS.get(word)
+        digit = SPOKEN_DIGITS.get(word)
         if digit is not None:
             out.append(digit * repeat)
         else:

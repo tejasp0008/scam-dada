@@ -138,6 +138,57 @@ BAIT_HOOKS: tuple[BaitHook, ...] = (
 )
 
 
+#: Hooks for the one window in a call where the scammer will volunteer his own identifiers.
+#:
+#: Every hook above is a *delay*, armed when he is close to leaving. These are the opposite:
+#: armed on reaching the payment stage whether or not he is impatient, because that is the
+#: only point at which he wants to hand over a destination account, and once the moment has
+#: passed asking for it is just suspicious.
+#:
+#: **Acceptance, never completion.** The persona agrees in principle and then needs one more
+#: thing before it can happen - a slip to carry to the bank, a clerk who will ask a question,
+#: a grandson who does the transfers. That keeps the property the delay hooks have, that
+#: nothing is ever promised outright: a promise he can hold the persona to is the point at
+#: which he stops talking and starts waiting. Here the asking *is* the tactic, because every
+#: question is a precondition he has to satisfy before his money can arrive.
+#:
+#: Each hook asks for a different field, so firing all four assembles a payee: account and
+#: IFSC, the name it is held in, a fallback handle, and the reference he wants written on it.
+#: None of them offers an identifier of the persona's own - the canary exists for that, and
+#: it is issued deliberately rather than improvised mid-sentence.
+PAYMENT_ELICITATION: tuple[BaitHook, ...] = (
+    BaitHook(
+        name="deposit_slip",
+        stage=ScamStage.PAYMENT,
+        instruction="Say you will do it, but that you do not use the phone for money - you "
+        "fill a slip and hand it over at the bank counter. Ask him for the full account "
+        "number and the IFSC code slowly, because you are writing it down. Do not read any "
+        "number back correctly.",
+    ),
+    BaitHook(
+        name="name_on_the_slip",
+        stage=ScamStage.PAYMENT,
+        instruction="Say the clerk at the counter always asks whose name the account is in "
+        "before he will accept a slip, and ask for the account holder's full name as it is "
+        "printed. Apologetic about the rule, not doubtful about him.",
+    ),
+    BaitHook(
+        name="transfer_failed_before",
+        stage=ScamStage.PAYMENT,
+        instruction="Say a transfer you made once went to a wrong account and took a month to "
+        "come back, and ask whether he has a second number or account to use if the first one "
+        "fails. Worried on his behalf, not suspicious of him.",
+    ),
+    BaitHook(
+        name="reference_on_the_slip",
+        stage=ScamStage.PAYMENT,
+        instruction="Accept the idea of sending a small amount first and ask what exact figure "
+        "and what reference or remark to write with it so nobody loses track of it. Never name "
+        "a figure yourself, and do not say when you will go to the bank.",
+    ),
+)
+
+
 def assess(turns: Sequence[Turn], *, threshold: float = HOOK_THRESHOLD) -> RiskAssessment:
     """Score how close the caller is to hanging up.
 

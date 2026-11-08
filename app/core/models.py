@@ -47,6 +47,13 @@ class EntityType(StrEnum):
     UPI_ID = "upi_id"
     PHONE = "phone"
     IFSC = "ifsc"
+    #: The destination account, and with the IFSC the strongest lead in a call: unlike a
+    #: claimed rank or a case number, a payee account is a real registered thing that a bank
+    #: or the cybercrime portal can act on.
+    ACCOUNT_NUMBER = "account_number"
+    #: Whose name the destination account is in, as he says it. Almost never his own, which
+    #: is itself worth having: it names a mule account.
+    PAYEE_NAME = "payee_name"
     AMOUNT = "amount"
     OFFICER_NAME = "officer_name"
     ORGANISATION = "organisation"

@@ -15,6 +15,8 @@ const STAGE_BLURB = {
 };
 const ENTITY_LABELS = {
   upi_id: "UPI handle",
+  account_number: "Payee account",
+  payee_name: "Payee name",
   phone: "Phone number",
   ifsc: "Bank IFSC",
   amount: "Amount",

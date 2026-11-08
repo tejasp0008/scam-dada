@@ -24,6 +24,7 @@ import re
 from collections.abc import Iterable, Sequence
 
 from app.core.models import Entity, EntitySource, EntityType
+from app.core.spoken import digit_run_after
 
 #: Hindi/Hinglish number words, including the transliteration variants Prisma produces.
 #: Values up to twenty plus the tens, which is as far as a spoken amount realistically goes
@@ -112,6 +113,35 @@ _IFSC = re.compile(r"\b([A-Z]{4}0[A-Z0-9]{6})\b")
 #: Written as a single alternation rather than one loose pattern because a bare ten-digit
 #: run also matches account numbers, case numbers and dates.
 _PHONE = re.compile(r"(?<![\d])(?:\+?91[\s-]?)?([6-9]\d{4}[\s-]?\d{5}|[6-9]\d{9})(?![\d])")
+
+#: A destination bank account, which needs a keyword to be worth reporting at all.
+#:
+#: A bare run of digits is the single loosest thing in a transcript: it is also phone
+#: numbers, case numbers, amounts, dates, employee numbers and a badge he just invented. So
+#: the number is only an account number if he said it was one, and the keyword list is the
+#: whole pattern. `[^0-9]{0,24}` spans the words between the keyword and the digits ("account
+#: number toh yeh hai") without letting it reach into the next clause.
+#:
+#: Digits may be separated, because a scammer reading an account number aloud is transcribed
+#: with spaces in it, and the groups are not consistent enough to anchor on.
+#: The keyword only. What follows it may be digits or digits read aloud, so the number
+#: itself is read by `digit_run_after` rather than matched here: a regex cannot both span
+#: "zero zero one one" and refuse to span the clause after it.
+_ACCOUNT_KEYWORD = re.compile(
+    r"\b(?:a\s*/?\s*c|acc(?:oun)?t?|account|khata|khate|khaata)\b"
+    r"(?:\s*(?:number|num|no\.?|nmbr))?",
+    re.IGNORECASE,
+)
+
+#: An Indian bank account is 9 to 18 digits. Shorter is a fragment of something else.
+_ACCOUNT_DIGITS = (9, 18)
+
+#: A ten-digit run starting 6-9 is an Indian mobile number, and `_PHONE` already reports it.
+#: Scammers say "account se linked number" constantly, so without this the same digits land
+#: twice under two types - and an operator chasing a bank for a mobile number is worse than
+#: a missed field. A genuine ten-digit account in that range is lost; every major Indian bank
+#: issues eleven or more, so that is the cheaper error.
+_LOOKS_LIKE_MOBILE = re.compile(r"^[6-9]\d{9}$")
 
 #: Digits with an optional currency mark and an optional multiplier word.
 _AMOUNT_DIGITS = re.compile(
@@ -278,6 +308,20 @@ def extract_from_turn(text: str, turn_seq: int) -> tuple[Entity, ...]:
             Entity(
                 entity_type=EntityType.IFSC,
                 value=match.group(1),
+                source=EntitySource.REGEX,
+                turn_seq=turn_seq,
+            )
+        )
+
+    for match in _ACCOUNT_KEYWORD.finditer(text):
+        digits = digit_run_after(text[match.end() :])
+        low, high = _ACCOUNT_DIGITS
+        if not low <= len(digits) <= high or _LOOKS_LIKE_MOBILE.match(digits):
+            continue
+        found.append(
+            Entity(
+                entity_type=EntityType.ACCOUNT_NUMBER,
+                value=digits,
                 source=EntitySource.REGEX,
                 turn_seq=turn_seq,
             )

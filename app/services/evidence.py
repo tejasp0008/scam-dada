@@ -41,6 +41,8 @@ ENTITY_LABELS: dict[str, str] = {
     "upi_id": "UPI handle",
     "phone": "Phone number",
     "ifsc": "Bank IFSC",
+    "account_number": "Destination account",
+    "payee_name": "Destination account holder",
     "amount": "Amount demanded",
     "officer_name": "Claimed name",
     "organisation": "Claimed organisation",

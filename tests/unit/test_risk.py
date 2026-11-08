@@ -10,6 +10,7 @@ from app.core.models import PersonaId, ScamStage, Speaker, Turn
 from app.core.risk import (
     BAIT_HOOKS,
     HOOK_THRESHOLD,
+    PAYMENT_ELICITATION,
     BaitHook,
     assess,
     choose_hook,
@@ -171,6 +172,42 @@ class TestHooks:
     def test_no_hook_invents_a_real_identifier(self, hook: BaitHook) -> None:
         assert not re.search(r"\b[6-9]\d{9}\b", hook.instruction)
         assert not re.search(r"\b\d{4}\s?\d{4}\s?\d{4}\b", hook.instruction)
+
+
+class TestPaymentElicitation:
+    """The payment stage is the only window in which he gives up his own account."""
+
+    def test_every_elicitation_hook_is_for_the_payment_stage(self) -> None:
+        assert all(hook.stage is ScamStage.PAYMENT for hook in PAYMENT_ELICITATION)
+
+    def test_the_four_hooks_ask_for_four_different_fields(self) -> None:
+        """Firing all of them has to assemble a payee, not ask the same thing four ways."""
+        assert len({hook.name for hook in PAYMENT_ELICITATION}) == len(PAYMENT_ELICITATION)
+        asks = " ".join(hook.instruction.lower() for hook in PAYMENT_ELICITATION)
+        for field in ("account number", "ifsc", "name", "second number", "reference"):
+            assert field in asks, field
+
+    def test_no_elicitation_hook_names_an_amount_or_a_deadline(self) -> None:
+        """A figure the persona names is a figure he can hold it to, and then he waits."""
+        for hook in PAYMENT_ELICITATION:
+            assert not re.search(r"\b\d+\b", hook.instruction), hook.name
+
+    def test_an_elicitation_hook_is_not_in_the_delay_set(self) -> None:
+        """Two lists with two triggers. Mixing them would arm a delay on the payment turn."""
+        delay = {hook.name for hook in BAIT_HOOKS}
+        assert not delay & {hook.name for hook in PAYMENT_ELICITATION}
+
+    def test_hooks_are_chosen_from_the_elicitation_set_without_repeating(self) -> None:
+        used: list[str] = []
+        for _ in PAYMENT_ELICITATION:
+            hook = choose_hook(ScamStage.PAYMENT, used, hooks=PAYMENT_ELICITATION)
+            assert hook is not None
+            used.append(hook.name)
+        assert choose_hook(ScamStage.PAYMENT, used, hooks=PAYMENT_ELICITATION) is None
+
+    def test_an_earlier_stage_gets_no_elicitation_hook(self) -> None:
+        """Asking for his account while he is still claiming a rank is just suspicious."""
+        assert choose_hook(ScamStage.HOOK, (), hooks=PAYMENT_ELICITATION) is None
 
 
 class TestFalsePositivesFromRealCalls:

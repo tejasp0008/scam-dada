@@ -55,6 +55,12 @@ SCAMMER_SCRIPT = (
     "Case number FAKE-CYB-0001 register ho gaya hai, abhi verify karna padega.",
     "Aap kisi ko bataiye mat, warrant nikal jayega aapke naam par.",
     "Verification ke liye fake.officer@demo par chhota amount bhej dijiye.",
+    # The payment stage, continued, so the elicitation hooks have something to elicit. These
+    # are what a scammer says once the persona has agreed in principle and asked for a slip.
+    # Every value is unusable on purpose: the account begins 0000, which no Indian bank
+    # issues, and the IFSC bank code is FAKE, exactly as the canary builds them.
+    "Account number likh lijiye, zero zero zero zero one one two two three three four four.",
+    "IFSC code FAKE0000777 hai, aur account Suresh Kumar ke naam par hai.",
     "Aap apne dada ji se baat karwaiye, mujhe unse hi baat karni hai.",
 )
 

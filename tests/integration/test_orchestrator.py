@@ -17,6 +17,7 @@ from app.core.canary import issue
 from app.core.events import EventType
 from app.core.models import EntitySource, EntityType, PersonaId, ScamStage, Speaker
 from app.core.personas import LEAD_PERSONA, REPLY_STYLE_NOTE
+from app.core.risk import HOOK_THRESHOLD
 from app.core.state import CallState
 from app.providers.base import Role, SttConfig
 from app.providers.mock import MockLLMProvider, MockSTTProvider, MockTTSProvider
@@ -523,6 +524,30 @@ class TestIntelligence:
             m.content for messages in llm.chat_calls for m in messages if m.role is Role.SYSTEM
         ]
         assert any("close to ending the call" in text for text in instructions)
+
+    async def test_the_payment_stage_arms_an_elicitation_hook_on_a_calm_call(self) -> None:
+        """Not driven by risk: it is the stage that opens the window, and it closes again."""
+        orchestrator, recorder, _, llm = build(
+            script=(
+                "Verification ke liye chhota amount bhej dijiye, UPI par.",
+                "Haan ji, bataiye.",
+            ),
+            frames_per_utterance=5,
+            handoff_after=99,
+        )
+        await orchestrator.run(audio(speech_frames=6, silence_frames=3, bursts=2))
+
+        stages = [e for e in recorder.history() if e.type is EventType.STAGE]
+        assert any(e.stage is ScamStage.PAYMENT for e in stages), "never reached payment"
+        risks = [e for e in recorder.history() if e.type is EventType.RISK]
+        assert max(e.hangup_risk for e in risks) < HOOK_THRESHOLD, "this test needs a calm call"
+
+        instructions = [
+            m.content for messages in llm.chat_calls for m in messages if m.role is Role.SYSTEM
+        ]
+        assert any("his own account details" in text for text in instructions)
+        # The delay-hook lead-in would tell the model to hurry, which loses the details.
+        assert not any("close to ending the call" in text for text in instructions)
 
     async def test_no_hook_is_armed_on_a_calm_call(self) -> None:
         orchestrator, _, _, llm = build(

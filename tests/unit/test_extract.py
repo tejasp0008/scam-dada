@@ -69,6 +69,57 @@ class TestIfsc:
         assert values("code SBIN1001234", EntityType.IFSC) == []
 
 
+class TestAccountNumbers:
+    """The destination account is the one identifier that leads somewhere."""
+
+    def test_an_account_number_needs_the_word_account(self) -> None:
+        assert values("account number 50100234567890 hai", EntityType.ACCOUNT_NUMBER) == [
+            "50100234567890"
+        ]
+
+    def test_a_bare_digit_run_is_not_an_account_number(self) -> None:
+        """Without the keyword this pattern would also match dates, badges and amounts."""
+        assert values("50100234567890 hai", EntityType.ACCOUNT_NUMBER) == []
+
+    def test_an_account_number_read_aloud_is_captured(self) -> None:
+        """How it actually arrives: Prisma transcribes a dictated number as words."""
+        text = "Account number likh lijiye, zero zero one one two two three three four four."
+        assert values(text, EntityType.ACCOUNT_NUMBER) == ["0011223344"]
+
+    def test_the_number_may_start_a_few_words_after_the_keyword(self) -> None:
+        assert values("account number yeh hai 50100234567890", EntityType.ACCOUNT_NUMBER) == [
+            "50100234567890"
+        ]
+
+    def test_a_spoken_amount_after_the_word_account_is_not_an_account(self) -> None:
+        """ "do" is the digit two and the word two; "do lakh" is a sum, not an account."""
+        text = "account mein do lakh bhej do"
+        assert values(text, EntityType.ACCOUNT_NUMBER) == []
+        assert values(text, EntityType.AMOUNT) == ["INR 200000"]
+
+    def test_digits_read_aloud_with_gaps_are_joined(self) -> None:
+        assert values("a/c no 1234 5678 9012 likh lijiye", EntityType.ACCOUNT_NUMBER) == [
+            "123456789012"
+        ]
+
+    def test_hinglish_khata_is_a_keyword(self) -> None:
+        assert values("khata number 11223344556 mein", EntityType.ACCOUNT_NUMBER) == ["11223344556"]
+
+    def test_a_mobile_number_after_the_word_account_is_not_an_account(self) -> None:
+        """ "Account se linked number" is said on every call, and it is a phone number."""
+        text = "account se linked number 9876543210 hai"
+        assert values(text, EntityType.ACCOUNT_NUMBER) == []
+        assert values(text, EntityType.PHONE) == ["9876543210"]
+
+    def test_a_case_number_is_not_an_account_number(self) -> None:
+        assert values("case number FAKE-CYB-0001 register", EntityType.ACCOUNT_NUMBER) == []
+
+    def test_digits_in_a_later_clause_are_not_claimed(self) -> None:
+        """The keyword window stops at the clause; reaching past it is how false hits happen."""
+        text = "account holder ka naam Rajesh hai aur unka phone 987654321098 hai"
+        assert values(text, EntityType.ACCOUNT_NUMBER) == []
+
+
 class TestAmounts:
     @pytest.mark.parametrize(
         ("text", "expected"),

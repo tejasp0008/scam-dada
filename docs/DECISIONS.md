@@ -1225,3 +1225,75 @@ tokens per minute and a turn costs ~1520, so the primary sustains about **four a
 dialogue turns per minute**. Past that it returns 429 and every turn goes to the fallback,
 which is 503 ms to first token instead of 274 ms. That ceiling is unrelated to these
 commits — it is the reason the fallback exists.
+
+## 0033 — Acceptance at the payment stage, to collect a payee
+*2026-11-08 · intelligence*
+
+Every hook in `BAIT_HOOKS` is a **delay**, armed by hang-up risk, and three of the seven are
+for the payment stage — a fixed deposit he cannot break, a pension that arrives on the first,
+an account at another bank. They waste his time well and collect nothing. The call ends with
+his claimed rank, his claimed department and a case number he made up: no identifier that
+leads anywhere.
+
+**The destination account does lead somewhere.** Unlike a rank or a case number it is a real
+registered thing, and a UPI handle, an account with an IFSC, or the name a mule account is
+held in is what a bank or the cybercrime portal can act on. So it is worth a tactic of its
+own.
+
+**A second hook list with a different trigger.** `PAYMENT_ELICITATION` is armed on *reaching*
+the payment stage, whether or not he is impatient, and it is checked before the delay hooks.
+The difference is recoverability: a forgotten bank account is just as good four turns later,
+while a destination account is only ever on the table while he still expects money to arrive
+in it. A high risk score at the payment stage is a reason to elicit sooner rather than to
+stall — he stays for the same reason he called.
+
+**Acceptance, never completion.** The persona agrees in principle and then needs one more
+thing before it can happen: a slip to carry to the counter, a name the clerk will ask for, a
+fallback account because a transfer once went astray, a reference to write so nothing is
+lost. This keeps the property the delay hooks have, that nothing is promised outright — a
+promise he can hold the persona to is the point at which he stops talking and starts waiting.
+Here the asking *is* the tactic, because every question is a precondition he has to satisfy
+before his money can arrive. Each of the four asks for a different field, so firing them in
+sequence assembles a payee rather than asking the same thing four ways.
+
+The lead-in differs by trigger, which is the part that is easy to miss: telling the model
+"the caller is close to ending the call" in front of an elicitation hook makes the persona
+hurry, and hurrying is what loses the details.
+
+**Nothing is paid and no identifier of ours is improvised.** The canary identity exists for
+the one case where the persona must hand something over, and it is issued deliberately rather
+than invented mid-sentence.
+
+**Extraction had to keep up**, or eliciting a number nobody captures is theatre. Two new
+types, `account_number` and `payee_name`, and the regex has two properties worth recording:
+
+* **A keyword is the whole pattern.** A bare digit run is the loosest thing in a transcript —
+  it is also phone numbers, case numbers, amounts, dates and badge numbers — so a number is
+  an account number only if he said it was one. A ten-digit run starting 6-9 is dropped,
+  because "account se linked number" is said on every call and `phone` already reports it. A
+  genuine ten-digit account in that range is lost; every major Indian bank issues eleven or
+  more, so that is the cheaper error.
+* **It is read aloud, not written.** Prisma transcribes a dictated number as *words* — "zero
+  zero one one two two" — which no digit pattern matches. `app/core/spoken.py` now holds the
+  digit-word table that `canary.despoken` owned, because an account number is not a canary
+  concern, and `digit_run` stops at the first token that is not part of a number so the
+  keyword cannot swallow the clause after it. `digit_run_after` steps over the few words
+  between the keyword and the digits, with a small limit for the same reason.
+
+**Measured on the scripted call**, which now continues past the UPI line so there is something
+to elicit. Entities went from 6 to 9 and the full payee was assembled:
+
+| | |
+|---|---|
+| `account_number` | `000011223344` (regex, from dictated speech) |
+| `ifsc` | `FAKE0000777` (llm) |
+| `payee_name` | `Suresh Kumar` (llm) |
+| `upi_id` | `fake.officer@demo` (llm) |
+
+Three hooks armed, all on `trigger=payment_stage`, and the persona asked for it in character:
+"Arre, yeh toh adhoora hai. Poora number batao, aur IFSC code bhi." Then, on the holder's
+name: "Suresh Kumar? Dada ne likha tha Ramesh ji ka naam" — the hook landing on top of the
+grandfather's-notes-do-not-match tactic, which is the behaviour the prompt already had.
+
+The scripted values stay unusable by construction: the account begins `0000`, which no Indian
+bank issues, and the IFSC bank code is `FAKE`, exactly as the canary builds them.

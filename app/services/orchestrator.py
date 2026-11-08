@@ -25,6 +25,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import ClassVar
 
 from app.core.audio.call_profile import PROFILES_BY_NAME, CallProfile
 from app.core.audio.framing import FrameBuffer
@@ -40,7 +41,7 @@ from app.core.events import (
     StateChangeEvent,
     TranscriptEvent,
 )
-from app.core.models import Entity, PersonaId, Speaker, Turn
+from app.core.models import Entity, PersonaId, ScamStage, Speaker, Turn
 from app.core.personas import (
     LEAD_PERSONA,
     REPLY_STYLE_NOTE,
@@ -49,7 +50,7 @@ from app.core.personas import (
     next_in_relay,
     profile_for,
 )
-from app.core.risk import BaitHook, choose_hook
+from app.core.risk import PAYMENT_ELICITATION, BaitHook, choose_hook
 from app.core.state import CallState, transition
 from app.core.tags import has_speech, sanitize_tags, tidy_for_speech
 from app.core.turn import (
@@ -242,6 +243,7 @@ class CallOrchestrator:
         self._used_hooks: list[str] = []
         self._handoff_reason = ""
         self._pending_hook: BaitHook | None = None
+        self._pending_trigger = ""
         self._reported_entities: set[tuple[str, str]] = set()
         self._caller_turns_seen = 0
         self.ended_reason: str | None = None
@@ -575,24 +577,37 @@ class CallOrchestrator:
         messages.append(ChatMessage(role=Role.SYSTEM, content="\n\n".join(n for n in notes if n)))
         return messages
 
+    #: Why a hook was armed, which decides how it is introduced to the model. A delay hook
+    #: needs the model to know he is leaving; telling it that in front of an elicitation hook
+    #: would make the persona hurry, and hurrying is what loses the details.
+    _HOOK_LEAD_IN: ClassVar[dict[str, str]] = {
+        "hangup_risk": "The caller is close to ending the call.",
+        "payment_stage": "He is asking for money, which is the one moment he will give up "
+        "his own account details. Stay willing and slow; do not refuse and do not hurry.",
+    }
+
     def _hook_note(self) -> str | None:
         """The armed bait hook as an instruction for this reply, if one is armed."""
-        hook = self._take_hook()
-        if hook is None:
+        taken = self._take_hook()
+        if taken is None:
             return None
+        hook, trigger = taken
+        lead_in = self._HOOK_LEAD_IN.get(trigger, "")
         return (
-            "The caller is close to ending the call. Work the following into this reply, "
-            f"in character and without hurrying: {hook.instruction}"
-        )
+            f"{lead_in} Work the following into this reply, in character and without "
+            f"hurrying: {hook.instruction}"
+        ).strip()
 
-    def _take_hook(self) -> BaitHook | None:
+    def _take_hook(self) -> tuple[BaitHook, str] | None:
         """Consume the armed hook, if there is one. Each hook is used at most once."""
         hook = self._pending_hook
         if hook is None:
             return None
+        trigger = self._pending_trigger
         self._pending_hook = None
+        self._pending_trigger = ""
         self._used_hooks.append(hook.name)
-        return hook
+        return hook, trigger
 
     def _handoff_note(self, window: Sequence[Turn]) -> str | None:
         """Tell the current persona which of the replies above were somebody else's."""
@@ -898,23 +913,44 @@ class CallOrchestrator:
         await self._recorder.emit(build)
 
     def _arm_hook(self, analysis: TurnAnalysis) -> None:
-        """Pick a bait hook when the caller is close to leaving.
+        """Pick the tactic for the next reply.
 
         Armed here and consumed by the next reply rather than applied retroactively: the
-        turn whose risk score triggered the hook has already been spoken.
+        turn whose analysis triggered the hook has already been spoken.
+
+        Two different triggers, and the stage one is checked first. A delay hook is armed by
+        hang-up risk, and it is recoverable - if the moment passes, a forgotten bank account
+        is just as good four turns later. An elicitation hook is armed by *reaching the
+        payment stage* regardless of risk, because it is not recoverable: the only window in
+        which a scammer will read out a destination account is while he is still expecting
+        money to arrive in it. A high risk score at the payment stage is a reason to elicit
+        sooner rather than to stall - he stays for the same reason he called.
         """
-        if not analysis.needs_hook or self._pending_hook is not None:
+        if self._pending_hook is not None:
+            return
+        if analysis.stage is ScamStage.PAYMENT and (
+            hook := choose_hook(analysis.stage, self._used_hooks, hooks=PAYMENT_ELICITATION)
+        ):
+            self._arm(hook, analysis, trigger="payment_stage")
+            return
+        if not analysis.needs_hook:
             return
         hook = choose_hook(analysis.stage, self._used_hooks)
         if hook is None:
             logger.info("hang-up risk is high but every hook is spent")
             return
+        self._arm(hook, analysis, trigger="hangup_risk")
+
+    def _arm(self, hook: BaitHook, analysis: TurnAnalysis, *, trigger: str) -> None:
         self._pending_hook = hook
+        self._pending_trigger = trigger
         logger.info(
             "arming a bait hook",
             extra={
                 "call_id": self._config.call_id,
                 "hook": hook.name,
+                "trigger": trigger,
+                "stage": analysis.stage.value,
                 "hangup_risk": analysis.hangup_risk,
                 "signals": list(analysis.risk_signals),
             },

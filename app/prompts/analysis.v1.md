@@ -23,11 +23,17 @@ who has asked for money and returns to waving his rank is reinforcing, not retre
 secrecy and credential requests raise it. A calm pretext is low even if the content alarms.
 
 **entities** — identifiers a pattern matcher would miss: `officer_name`, `organisation`,
-`case_number`, `upi_id`, `phone`, `ifsc`, `amount`. Value as spoken, normalised only for
-obvious transcription artefacts (a name spelled out letter by letter becomes the name). Give
-each a confidence. **Report nothing you are inferring rather than reading** — if he never
-gives a name there is no `officer_name`, and an empty list is the right answer more often
-than not.
+`case_number`, `upi_id`, `phone`, `ifsc`, `account_number`, `payee_name`, `amount`. Value as
+spoken, normalised only for obvious transcription artefacts (a name spelled out letter by
+letter becomes the name, digits read aloud as words become digits). Give each a confidence.
+**Report nothing you are inferring rather than reading** — if he never gives a name there is
+no `officer_name`, and an empty list is the right answer more often than not.
+
+Two of those are about where the money goes, and they are not the same as the two that are
+about him. `account_number` and `payee_name` describe the **destination he is asking for** —
+the account, and whose name he says it is held in. `officer_name` is the name he claims for
+*himself*. When he says the account is in a different name, that is a `payee_name`, not a
+correction to `officer_name`.
 
 **tactics** — at most four short neutral labels for the operator's timeline, e.g.
 `impersonating_police`, `threatening_arrest`, `demanding_secrecy`, `requesting_otp`,
