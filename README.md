@@ -101,8 +101,8 @@ Built for the Great Indian AI Internship Challenge on Gnani's speech models.
 
 Not built yet: the robocall-versus-human check (feature 6) and Guardian Mode's handoff
 trigger. Both are modelled in the state machine, but a call is currently assumed to be a
-human. See [PLAN.md](PLAN.md) for the phase plan and [docs/DECISIONS.md](docs/DECISIONS.md)
-for why the architecture looks like this.
+human. See [docs/DECISIONS.md](docs/DECISIONS.md) for why the architecture looks like this
+— one entry per hard-to-reverse choice, 34 of them.
 
 ## Measured performance
 
@@ -422,8 +422,9 @@ real limit.
 - **`docker compose` also publishes port 8000.** A stale `api` container and a local
   `uvicorn` both answer there, and `/readyz` will happily report the container's mock
   providers while the real server runs beside it. Stop the container or use another port.
-- **One Alembic baseline, no incremental migrations** during contest week. Deliberate: see
-  PLAN.md §0.
+- **The schema is one Alembic baseline plus one follow-up**, not an incremental history.
+  Deliberate while the schema is still moving and no deployed database needs upgrading: the
+  baseline is regenerated rather than migrated onto.
 
 ## Repository layout
 
